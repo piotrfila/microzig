@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const log = std.log.scoped(.usb);
 
 pub const descriptor = @import("usb/descriptor.zig");
@@ -15,7 +16,7 @@ pub const nak: ?[]const u8 = null;
 /// Any device implementation used with DeviceController must implement those functions
 pub const DeviceInterface = struct {
     pub const VTable = struct {
-        start_tx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, buffer: []const u8) void,
+        start_tx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, buffer: []const u8) ?usize,
         start_rx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, len: usize) void,
         endpoint_open: *const fn (self: *DeviceInterface, desc: *const descriptor.Endpoint) void,
         set_address: *const fn (self: *DeviceInterface, addr: u7) void,
@@ -26,7 +27,8 @@ pub const DeviceInterface = struct {
     /// Called by drivers to send a packet.
     /// Submitting an empty slice signals an ACK.
     /// If you intend to send ACK, please use the constant `usb.ack`.
-    pub fn start_tx(self: *@This(), ep_num: types.Endpoint.Num, buffer: []const u8) void {
+    /// Returns null if transmit queue is full, otherwise the number of bytes sent.
+    pub fn start_tx(self: *@This(), ep_num: types.Endpoint.Num, buffer: []const u8) ?usize {
         return self.vtable.start_tx(self, ep_num, buffer);
     }
 
@@ -70,7 +72,7 @@ pub const Config = struct {
 ///
 /// This code handles usb enumeration and configuration and routes packets to drivers.
 pub fn DeviceController(config: Config) type {
-    std.debug.assert(config.configurations.len == 1);
+    assert(config.configurations.len == 1);
 
     return struct {
         const config0 = config.configurations[0];
@@ -238,7 +240,7 @@ pub fn DeviceController(config: Config) type {
 
                         const next_data_chunk = self.tx_slice[0..@min(64, self.tx_slice.len)];
                         if (next_data_chunk.len > 0) {
-                            device_itf.start_tx(.ep0, next_data_chunk);
+                            assert(device_itf.start_tx(.ep0, next_data_chunk) == next_data_chunk.len);
                         } else {
                             device_itf.start_rx(.ep0, 0);
 
@@ -285,7 +287,7 @@ pub fn DeviceController(config: Config) type {
         fn send_cmd_response(self: *@This(), device_itf: *DeviceInterface, data: []const u8, expected_max_length: u16) void {
             self.tx_slice = data[0..@min(data.len, expected_max_length)];
             const len = @min(config.device_descriptor.max_packet_size0, self.tx_slice.len);
-            device_itf.start_tx(.ep0, data[0..len]);
+            assert(device_itf.start_tx(.ep0, data[0..len]) == len);
         }
 
         fn driver_class_control(self: *@This(), device_itf: *DeviceInterface, driver: DriverEnum, stage: types.ControlStage, setup: *const types.SetupPacket) void {
@@ -308,7 +310,7 @@ pub fn DeviceController(config: Config) type {
                     switch (std.meta.intToEnum(types.SetupRequest, setup.request) catch return) {
                         .SetAddress => {
                             self.new_address = @as(u8, @intCast(setup.value & 0xff));
-                            device_itf.start_tx(.ep0, ack);
+                            assert(device_itf.start_tx(.ep0, ack) == 0);
                             if (config.debug) log.info("    SetAddress: {}", .{self.new_address.?});
                         },
                         .SetConfiguration => {
@@ -323,7 +325,7 @@ pub fn DeviceController(config: Config) type {
                                     // TODO: call umount callback if any
                                 }
                             }
-                            device_itf.start_tx(.ep0, ack);
+                            assert(device_itf.start_tx(.ep0, ack) == 0);
                         },
                         .GetDescriptor => {
                             const descriptor_type = std.meta.intToEnum(descriptor.Type, setup.value >> 8) catch null;
@@ -334,7 +336,7 @@ pub fn DeviceController(config: Config) type {
                         .SetFeature => {
                             if (std.meta.intToEnum(types.FeatureSelector, setup.value >> 8)) |feat| {
                                 switch (feat) {
-                                    .DeviceRemoteWakeup, .EndpointHalt => device_itf.start_tx(.ep0, ack),
+                                    .DeviceRemoteWakeup, .EndpointHalt => assert(device_itf.start_tx(.ep0, ack) == 0),
                                     // TODO: https://github.com/ZigEmbeddedGroup/microzig/issues/453
                                     .TestMode => {},
                                 }

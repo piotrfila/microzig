@@ -1,5 +1,6 @@
 const std = @import("std");
 const usb = @import("../../usb.zig");
+const assert = std.debug.assert;
 const descriptor = usb.descriptor;
 const types = usb.types;
 
@@ -154,7 +155,8 @@ pub fn CdcClassDriver(options: Options) type {
                 return 0;
             }
             const len = self.tx.read(&self.epin_buf);
-            self.device.start_tx(self.ep_in, self.epin_buf[0..len]);
+            // TODO: wait instead of discard
+            _ = self.device.start_tx(self.ep_in, self.epin_buf[0..len]);
             return len;
         }
 
@@ -209,7 +211,7 @@ pub fn CdcClassDriver(options: Options) type {
                     // If there is no data left, a empty packet should be sent if
                     // data len is multiple of EP Packet size and not zero
                     if (self.tx.get_readable_len() == 0 and data.len > 0 and data.len == options.max_packet_size) {
-                        self.device.start_tx(self.ep_in, &.{});
+                        assert(self.device.start_tx(self.ep_in, usb.ack) == 0);
                     }
                 }
             }

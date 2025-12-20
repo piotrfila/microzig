@@ -303,7 +303,7 @@ pub fn Polled(
             itf: *usb.DeviceInterface,
             ep_num: EpNum,
             buffer: []const u8,
-        ) void {
+        ) ?usize {
             const self: *@This() = @fieldParentPtr("interface", itf);
 
             // It is technically possible to support longer buffers but this demo
@@ -348,6 +348,8 @@ pub fn Polled(
             });
 
             ep.next_pid_1 = !ep.next_pid_1;
+
+            return buffer.len;
         }
 
         fn start_rx(itf: *usb.DeviceInterface, ep_num: EpNum, len: usize) void {
