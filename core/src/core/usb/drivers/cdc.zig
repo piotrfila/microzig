@@ -156,7 +156,8 @@ pub fn CdcClassDriver(options: Options) type {
             }
             const len = self.tx.read(&self.epin_buf);
             // TODO: wait instead of discard
-            _ = self.device.start_tx(self.ep_in, self.epin_buf[0..len]);
+            if (self.device.start_tx(self.ep_in, self.epin_buf[0..len]) != len)
+                std.log.err("data discarded", .{});
             return len;
         }
 
