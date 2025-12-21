@@ -89,9 +89,7 @@ pub fn Polled(
                 });
 
                 // Clear the status flag (write-one-to-clear)
-                var sie_status: @TypeOf(USB.SIE_STATUS).underlying_type = @bitCast(@as(u32, 0));
-                sie_status.SETUP_REC = 1;
-                USB.SIE_STATUS.write(sie_status);
+                USB.SIE_STATUS.configure(.{ .SETUP_REC = 1 });
 
                 self.controller.on_setup_req(&self.interface, setup);
             }
@@ -132,21 +130,14 @@ pub fn Polled(
             // Has the host signaled a bus reset?
             if (ints.BUS_RESET != 0) {
                 // Acknowledge by writing the write-one-to-clear status bit.
-                var sie_status: @TypeOf(USB.SIE_STATUS).underlying_type = @bitCast(@as(u32, 0));
-                sie_status.BUS_RESET = 1;
-                USB.SIE_STATUS.write(sie_status);
-                USB.ADDR_ENDP.modify(.{ .ADDRESS = 0 });
+                USB.SIE_STATUS.configure(.{ .BUS_RESET = 1 });
+                USB.ADDR_ENDP.configure(.{ .ADDRESS = 0 });
 
                 self.controller.on_bus_reset();
             }
         }
 
         pub fn init() @This() {
-            const chip = microzig.hal.compatibility.chip;
-
-            if (chip == .RP2350)
-                USB.MAIN_CTRL.modify(.{ .PHY_ISO = 0 });
-
             // Clear the control portion of DPRAM. This may not be necessary -- the
             // datasheet is ambiguous -- but the C examples do it, and so do we.
             const dpram_regs: [*]volatile u32 = @ptrCast(USB_DPRAM);
@@ -155,7 +146,7 @@ pub fn Polled(
 
             // Mux the controller to the onboard USB PHY. I was surprised that there are
             // alternatives to this, but, there are.
-            USB.USB_MUXING.modify(.{
+            USB.USB_MUXING.configure(.{
                 .TO_PHY = 1,
                 // This bit is also set in the SDK example, without any discussion. It's
                 // undocumented (being named does not count as being documented).
@@ -166,26 +157,26 @@ pub fn Polled(
             // let us detect being plugged into a host (the Pi Pico, to its credit,
             // does). For maximum compatibility, we'll set the hardware to always
             // pretend VBUS has been detected.
-            USB.USB_PWR.modify(.{
+            USB.USB_PWR.configure(.{
                 .VBUS_DETECT = 1,
                 .VBUS_DETECT_OVERRIDE_EN = 1,
             });
 
             // Enable controller in device mode.
-            USB.MAIN_CTRL.modify(.{
+            USB.MAIN_CTRL.configure(.{
                 .CONTROLLER_EN = 1,
                 .HOST_NDEVICE = 0,
             });
 
             // Request to have an interrupt (which really just means setting a bit in
             // the `buff_status` register) every time a buffer moves through EP0.
-            USB.SIE_CTRL.modify(.{
+            USB.SIE_CTRL.configure(.{
                 .EP0_INT_1BUF = 1,
             });
 
             // Enable interrupts (bits set in the `ints` register) for other conditions
             // we use:
-            USB.INTE.modify(.{
+            USB.INTE.configure(.{
                 // A buffer is done
                 .BUFF_STATUS = 1,
                 // The host has reset us
@@ -299,7 +290,7 @@ pub fn Polled(
 
         fn set_address(itf: *usb.DeviceInterface, addr: u7) void {
             _ = itf;
-            USB.ADDR_ENDP.modify(.{ .ADDRESS = addr });
+            USB.ADDR_ENDP.configure(.{ .ADDRESS = addr });
         }
 
         fn ep_to_buffer(self: *@This(), ep: types.Endpoint) *HardwareBuffer {

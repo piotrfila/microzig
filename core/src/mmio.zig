@@ -56,6 +56,18 @@ pub fn Mmio(comptime PackedT: type) type {
             write(addr, val);
         }
 
+        /// For each `.Field = value` entry of `fields`:
+        /// Set field `Field` of this register to `value
+        /// Other fields are set to zero.
+        /// This is the preffered way to handle write-1-to-clear registers.
+        pub inline fn configure(addr: *volatile Self, fields: anytype) void {
+            var val: PackedT = @bitCast(@as(IntT, 0));
+            inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |field| {
+                toggle_field(&val, field.name, @field(fields, field.name));
+            }
+            write(addr, val);
+        }
+
         /// In field `field_name` of struct `val`, toggle (only) all bits that are set in `value`.
         inline fn toggle_field(val: anytype, comptime field_name: []const u8, value: anytype) void {
             const FieldType = @TypeOf(@field(val, field_name));
