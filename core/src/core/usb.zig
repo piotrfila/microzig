@@ -17,7 +17,7 @@ pub const nak: ?[]const u8 = null;
 pub const DeviceInterface = struct {
     pub const VTable = struct {
         start_tx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, data: []const u8) ?usize,
-        start_rx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, request_len: u10) void,
+        start_rx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, data: []u8, request_len: ?u10) ?usize,
         endpoint_open: *const fn (self: *DeviceInterface, desc: *const descriptor.Endpoint) void,
         set_address: *const fn (self: *DeviceInterface, addr: u7) void,
     };
@@ -34,8 +34,8 @@ pub const DeviceInterface = struct {
 
     /// Called by drivers to report readiness to receive up to `len` bytes.
     /// Must be called exactly once before each packet.
-    pub fn start_rx(self: *@This(), ep_num: types.Endpoint.Num, request_len: u10) void {
-        return self.vtable.start_rx(self, ep_num, request_len);
+    pub fn start_rx(self: *@This(), ep_num: types.Endpoint.Num, data: []u8, request_len: ?u10) ?usize {
+        return self.vtable.start_rx(self, ep_num, data, request_len);
     }
 
     /// Opens an endpoint according to the descriptor. Note that if the endpoint
@@ -242,7 +242,7 @@ pub fn DeviceController(config: Config) type {
                         if (next_data_chunk.len > 0) {
                             assert(device_itf.start_tx(.ep0, next_data_chunk) == next_data_chunk.len);
                         } else {
-                            device_itf.start_rx(.ep0, 0);
+                            _ = device_itf.start_rx(.ep0, "", 0);
 
                             if (self.driver_last) |drv|
                                 self.driver_class_control(device_itf, drv, .Ack, self.setup_packet);
@@ -253,7 +253,7 @@ pub fn DeviceController(config: Config) type {
                         // status phase where the host sends us (via EP0
                         // OUT) a zero-byte DATA packet, so, set that
                         // up:
-                        device_itf.start_rx(.ep0, 0);
+                        _ = device_itf.start_rx(.ep0, "", 0);
 
                         if (self.driver_last) |drv|
                             self.driver_class_control(device_itf, drv, .Ack, self.setup_packet);

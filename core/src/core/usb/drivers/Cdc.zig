@@ -115,15 +115,12 @@ ep_in: types.Endpoint.Num,
 ep_out: types.Endpoint.Num,
 line_coding: LineCoding align(4),
 
-rx: FIFO = .empty,
 tx: FIFO = .empty,
 
 epin_buf: [options_max_packet_size]u8 = undefined,
 
 pub fn read(self: *@This(), dst: []u8) usize {
-    const read_count = self.rx.read(dst);
-    self.prep_out_transaction();
-    return read_count;
+    return self.device.start_rx(self.ep_out, dst, 64) orelse 0;
 }
 
 pub fn write(self: *@This(), data: []const u8) []const u8 {
@@ -151,13 +148,6 @@ pub fn write_flush(self: *@This()) usize {
     if (self.device.start_tx(self.ep_in, self.epin_buf[0..len]) != len)
         std.log.err("data discarded", .{});
     return len;
-}
-
-fn prep_out_transaction(self: *@This()) void {
-    if (self.rx.get_writable_len() >= options_max_packet_size) {
-        // Let endpoint know that we are ready for next packet
-        self.device.start_rx(self.ep_out, options_max_packet_size);
-    }
 }
 
 pub fn init(desc: *const Descriptor, device: *usb.DeviceInterface) @This() {
@@ -194,11 +184,6 @@ pub fn class_control(self: *@This(), stage: types.ControlStage, setup: types.Set
 }
 
 pub fn transfer(self: *@This(), ep: types.Endpoint, data: []u8) void {
-    if (ep == types.Endpoint.out(self.ep_out)) {
-        self.rx.write(data) catch {};
-        self.prep_out_transaction();
-    }
-
     if (ep == types.Endpoint.in(self.ep_in)) {
         if (self.write_flush() == 0) {
             // If there is no data left, a empty packet should be sent if

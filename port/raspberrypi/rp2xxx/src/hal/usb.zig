@@ -38,20 +38,10 @@ const HardwareBuffer = enum(u6) {
     }
 };
 
-pub fn get_ep_ctrl(ep: types.Endpoint) ?*volatile @TypeOf(USB_DPRAM.EP1_IN_CONTROL) {
-    const idx = std.math.sub(u4, @intFromEnum(ep.num), 1) catch return null;
-    const ep_ctrl: *volatile [15][2]u32 = @ptrCast(&USB_DPRAM.EP1_IN_CONTROL);
-    return @ptrCast(&ep_ctrl[idx][@intFromBool(ep.dir == .Out)]);
-}
-
-pub fn get_buf_ctrl(ep: types.Endpoint) *volatile @TypeOf(USB_DPRAM.EP0_IN_BUFFER_CONTROL) {
-    const buf_ctrl: *volatile [16][2]u32 = @ptrCast(&USB_DPRAM.EP0_IN_BUFFER_CONTROL);
-    return @ptrCast(&buf_ctrl[@intFromEnum(ep.num)][@intFromBool(ep.dir == .Out)]);
-}
-
 pub const Config = struct {
     sync_nops: comptime_int = 3,
     max_packet_size: comptime_int = 64,
+    num_endpoints: comptime_int = 1 << @bitSizeOf(types.Endpoint.Num),
 };
 
 pub fn Polled(
@@ -71,6 +61,17 @@ pub fn Polled(
         controller: usb.DeviceController(controller_config),
         interface: usb.DeviceInterface,
 
+        pub fn get_ep_ctrl(ep: types.Endpoint) ?*volatile @TypeOf(USB_DPRAM.EP1_IN_CONTROL) {
+            const idx = std.math.sub(u4, @intFromEnum(ep.num), 1) catch return null;
+            const ep_ctrl: *volatile [config.num_endpoints - 1][2]u32 = @ptrCast(&USB_DPRAM.EP1_IN_CONTROL);
+            return @ptrCast(&ep_ctrl[idx][@intFromBool(ep.dir == .Out)]);
+        }
+
+        pub fn get_buf_ctrl(ep: types.Endpoint) *volatile @TypeOf(USB_DPRAM.EP0_IN_BUFFER_CONTROL) {
+            const buf_ctrl: *volatile [config.num_endpoints][2]u32 = @ptrCast(&USB_DPRAM.EP0_IN_BUFFER_CONTROL);
+            return @ptrCast(&buf_ctrl[@intFromEnum(ep.num)][@intFromBool(ep.dir == .Out)]);
+        }
+
         pub fn poll(self: *@This()) void {
             // Check which interrupt flags are set.
             const ints = USB.INTS.read();
@@ -88,7 +89,10 @@ pub fn Polled(
                 });
 
                 // Clear the status flag (write-one-to-clear)
-                USB.SIE_STATUS.modify(.{ .SETUP_REC = 1 });
+                var sie_status: @TypeOf(USB.SIE_STATUS).underlying_type = @bitCast(@as(u32, 0));
+                sie_status.SETUP_REC = 1;
+                USB.SIE_STATUS.write(sie_status);
+
                 self.controller.on_setup_req(&self.interface, setup);
             }
 
@@ -107,7 +111,7 @@ pub fn Polled(
                     // Here we exploit knowledge of the ordering of buffer control
                     // registers in the peripheral. Each endpoint has a pair of
                     // registers, so we can determine the endpoint number by:
-                    const epnum = @as(u4, @intCast(lowbit_index >> 1));
+                    const epnum: u4 = @intCast(lowbit_index >> 1);
                     // Of the pair, the IN endpoint comes first, followed by OUT, so
                     // we can get the direction by:
                     const dir = if (lowbit_index & 1 == 0) usb.types.Dir.In else usb.types.Dir.Out;
@@ -128,7 +132,9 @@ pub fn Polled(
             // Has the host signaled a bus reset?
             if (ints.BUS_RESET != 0) {
                 // Acknowledge by writing the write-one-to-clear status bit.
-                USB.SIE_STATUS.modify(.{ .BUS_RESET = 1 });
+                var sie_status: @TypeOf(USB.SIE_STATUS).underlying_type = @bitCast(@as(u32, 0));
+                sie_status.BUS_RESET = 1;
+                USB.SIE_STATUS.write(sie_status);
                 USB.ADDR_ENDP.modify(.{ .ADDRESS = 0 });
 
                 self.controller.on_bus_reset();
@@ -238,7 +244,7 @@ pub fn Polled(
             // Configure buffer
             bufctrl.PID_0 ^= 1;
             bufctrl.FULL_0 = 1; // We have put data in
-            bufctrl.LENGTH_0 = @as(u10, @intCast(data.len)); // There are this many bytes
+            bufctrl.LENGTH_0 = @intCast(data.len); // There are this many bytes
             bufctrl_ptr.write(bufctrl);
 
             // Nop for some clock cycles for synchronization and transfer ownership
@@ -252,17 +258,13 @@ pub fn Polled(
         fn start_rx(
             itf: *usb.DeviceInterface,
             ep_num: types.Endpoint.Num,
-            len: u10,
-        ) void {
-            _ = itf;
-            // It is technically possible to support longer buffers but this demo
-            // doesn't bother.
-            // TODO: assert!(len <= 64);
-
+            data: []u8,
+            request_len: ?u10,
+        ) ?usize {
             // Acquire buffer ownership
             const bufctrl_ptr = get_buf_ctrl(.out(ep_num));
             var bufctrl = bufctrl_ptr.read();
-            if (bufctrl.AVAILABLE_0 == 1) return;
+            if (bufctrl.AVAILABLE_0 == 1) return null;
 
             // Register may have been only written partially
             asm volatile ("nop\n" ** config.sync_nops);
@@ -270,16 +272,29 @@ pub fn Polled(
 
             // Configure the OUT:
             bufctrl.PID_0 ^= 1; // Flip DATA0/1
+            const ret = if (bufctrl.FULL_0 == 0)
+                0
+            else blk: {
+                const self: *@This() = @fieldParentPtr("interface", itf);
+                const buffer = self.ep_to_buffer(.out(ep_num));
+
+                const len = @min(data.len, bufctrl.LENGTH_0);
+                if (data.len < len)
+                    std.log.err("discarded rx data", .{});
+                std.mem.copyForwards(u8, data[0..len], buffer.data()[0..len]);
+                break :blk len;
+            };
             bufctrl.FULL_0 = 0; // Buffer is NOT full, we want the computer to fill it
+            if (request_len) |len| {
+                bufctrl.LENGTH_0 = len; // Up tho this many bytes
+                bufctrl_ptr.write(bufctrl);
 
-            bufctrl.LENGTH_0 = len; // Up tho this many bytes
+                // Nop for some clock cycles for synchronization and release ownership
+                asm volatile ("nop\n" ** config.sync_nops);
+                bufctrl.AVAILABLE_0 = 1;
+            }
             bufctrl_ptr.write(bufctrl);
-
-            // Nop for some clock cycles for synchronization and release ownership
-            asm volatile ("nop\n" ** config.sync_nops);
-            bufctrl.AVAILABLE_0 = 1;
-
-            bufctrl_ptr.write(bufctrl);
+            return ret;
         }
 
         fn set_address(itf: *usb.DeviceInterface, addr: u7) void {
