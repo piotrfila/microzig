@@ -69,7 +69,7 @@ pub fn HidClassDriver(options: Options, report_descriptor: anytype) type {
             };
         }
 
-        pub fn class_control(self: *@This(), stage: types.ControlStage, setup: *const types.SetupPacket) ?[]const u8 {
+        pub fn class_control(self: *@This(), stage: types.ControlStage, setup: types.SetupPacket) ?[]const u8 {
             _ = self;
             if (stage == .Setup) switch (setup.request_type.type) {
                 .Standard => {

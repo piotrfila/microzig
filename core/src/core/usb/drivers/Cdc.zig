@@ -29,10 +29,6 @@ pub const LineCoding = extern struct {
 
 const options_max_packet_size = 64;
 
-pub const Options = struct {
-    max_packet_size: u16,
-};
-
 const FIFO = utilities.CircularBuffer(u8, options_max_packet_size);
 
 pub const Descriptor = extern struct {
@@ -124,10 +120,6 @@ tx: FIFO = .empty,
 
 epin_buf: [options_max_packet_size]u8 = undefined,
 
-pub fn available(self: *@This()) usize {
-    return self.rx.get_readable_len();
-}
-
 pub fn read(self: *@This(), dst: []u8) usize {
     const read_count = self.rx.read(dst);
     self.prep_out_transaction();
@@ -183,7 +175,7 @@ pub fn init(desc: *const Descriptor, device: *usb.DeviceInterface) @This() {
     };
 }
 
-pub fn class_control(self: *@This(), stage: types.ControlStage, setup: *const types.SetupPacket) ?[]const u8 {
+pub fn class_control(self: *@This(), stage: types.ControlStage, setup: types.SetupPacket) ?[]const u8 {
     if (std.meta.intToEnum(ManagementRequestType, setup.request)) |request| {
         if (stage == .Setup) switch (request) {
             .SetLineCoding => return usb.ack, // HACK, we should handle data phase somehow to read sent line_coding
