@@ -127,7 +127,7 @@ pub fn Polled(
                 }
 
                 USB.BUFF_STATUS.write_raw(bufbits_init);
-            } // <-- END of buf status handling
+            }
 
             // Has the host signaled a bus reset?
             if (ints.BUS_RESET != 0) {

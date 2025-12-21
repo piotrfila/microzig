@@ -73,7 +73,7 @@ pub fn HidClassDriver(options: Options, report_descriptor: anytype) type {
             _ = self;
             if (stage == .Setup) switch (setup.request_type.type) {
                 .Standard => {
-                    const hid_desc_type = std.meta.intToEnum(descriptor.hid.Hid.Type, (setup.value >> 8) & 0xff) catch return usb.nak;
+                    const hid_desc_type = std.meta.intToEnum(descriptor.hid.Hid.Type, (setup.value.into() >> 8) & 0xff) catch return usb.nak;
                     const request_code = std.meta.intToEnum(types.SetupRequest, setup.request) catch return usb.nak;
 
                     if (request_code == .GetDescriptor and hid_desc_type == .Hid)

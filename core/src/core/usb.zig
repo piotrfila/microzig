@@ -11,13 +11,14 @@ pub const types = @import("usb/types.zig");
 
 pub const ack: []const u8 = "";
 pub const nak: ?[]const u8 = null;
+pub const no_len_limit: comptime_int = std.math.maxInt(types.Len);
 
 /// USB Device interface
 /// Any device implementation used with DeviceController must implement those functions
 pub const DeviceInterface = struct {
     pub const VTable = struct {
         start_tx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, data: []const u8) ?usize,
-        start_rx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, data: []u8, request_len: ?u10) ?usize,
+        start_rx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, data: []u8, request_len: ?types.Len) ?usize,
         endpoint_open: *const fn (self: *DeviceInterface, desc: *const descriptor.Endpoint) void,
         set_address: *const fn (self: *DeviceInterface, addr: u7) void,
     };
@@ -188,7 +189,7 @@ pub fn DeviceController(config: Config) type {
 
             switch (setup.request_type.recipient) {
                 .Device => try self.process_setup_request(device_itf, setup),
-                .Interface => switch (@as(u8, @truncate(setup.index))) {
+                .Interface => switch (@as(u8, @truncate(setup.index.into()))) {
                     inline else => |itf_num| inline for (driver_fields) |fld_drv| {
                         const cfg = @field(config_descriptor, fld_drv.name);
                         comptime var fields = @typeInfo(@TypeOf(cfg)).@"struct".fields;
@@ -284,7 +285,7 @@ pub fn DeviceController(config: Config) type {
         // Utility functions
 
         /// Command response utility function that can split long data in multiple packets
-        fn send_cmd_response(self: *@This(), device_itf: *DeviceInterface, data: []const u8, expected_max_length: u16) void {
+        fn send_cmd_response(self: *@This(), device_itf: *DeviceInterface, data: []const u8, expected_max_length: types.Len) void {
             self.tx_slice = data[0..@min(data.len, expected_max_length)];
             const len = @min(config.device_descriptor.max_packet_size0, self.tx_slice.len);
             assert(device_itf.start_tx(.ep0, data[0..len]) == len);
@@ -295,7 +296,7 @@ pub fn DeviceController(config: Config) type {
                 inline else => |d| {
                     const drv = &@field(self.driver_data.?, @tagName(d));
                     if (drv.class_control(stage, setup)) |response|
-                        self.send_cmd_response(device_itf, response, setup.length);
+                        self.send_cmd_response(device_itf, response, setup.length.into_len());
                 },
             };
         }
@@ -309,14 +310,14 @@ pub fn DeviceController(config: Config) type {
                 .Standard => {
                     switch (std.meta.intToEnum(types.SetupRequest, setup.request) catch return) {
                         .SetAddress => {
-                            self.new_address = @as(u8, @intCast(setup.value & 0xff));
+                            self.new_address = @truncate(setup.value.into());
                             assert(device_itf.start_tx(.ep0, ack) == 0);
                             if (config.debug) log.info("    SetAddress: {}", .{self.new_address.?});
                         },
                         .SetConfiguration => {
                             if (config.debug) log.info("    SetConfiguration", .{});
-                            if (self.cfg_num != setup.value) {
-                                self.cfg_num = setup.value;
+                            if (self.cfg_num != setup.value.into()) {
+                                self.cfg_num = setup.value.into();
 
                                 if (self.cfg_num > 0) {
                                     try self.process_set_config(device_itf, self.cfg_num - 1);
@@ -328,13 +329,13 @@ pub fn DeviceController(config: Config) type {
                             assert(device_itf.start_tx(.ep0, ack) == 0);
                         },
                         .GetDescriptor => {
-                            const descriptor_type = std.meta.intToEnum(descriptor.Type, setup.value >> 8) catch null;
+                            const descriptor_type = std.meta.intToEnum(descriptor.Type, setup.value.into() >> 8) catch null;
                             if (descriptor_type) |dt| {
                                 try self.process_get_descriptor(device_itf, setup, dt);
                             }
                         },
                         .SetFeature => {
-                            if (std.meta.intToEnum(types.FeatureSelector, setup.value >> 8)) |feat| {
+                            if (std.meta.intToEnum(types.FeatureSelector, setup.value.into() >> 8)) |feat| {
                                 switch (feat) {
                                     .DeviceRemoteWakeup, .EndpointHalt => assert(device_itf.start_tx(.ep0, ack) == 0),
                                     // TODO: https://github.com/ZigEmbeddedGroup/microzig/issues/453
@@ -353,25 +354,25 @@ pub fn DeviceController(config: Config) type {
                 .Device => {
                     if (config.debug) log.info("        Device", .{});
 
-                    self.send_cmd_response(device_itf, @ptrCast(&config.device_descriptor), setup.length);
+                    self.send_cmd_response(device_itf, @ptrCast(&config.device_descriptor), setup.length.into_len());
                 },
                 .Configuration => {
                     if (config.debug) log.info("        Config", .{});
 
-                    self.send_cmd_response(device_itf, @ptrCast(&config_descriptor), setup.length);
+                    self.send_cmd_response(device_itf, @ptrCast(&config_descriptor), setup.length.into_len());
                 },
                 .String => {
                     if (config.debug) log.info("        String", .{});
                     // String descriptor index is in bottom 8 bits of
                     // `value`.
-                    const i: usize = @intCast(setup.value & 0xff);
+                    const i: u8 = @truncate(setup.value.into());
                     if (i >= config.string_descriptors.len)
                         log.warn("host requested invalid string descriptor {}", .{i})
                     else
                         self.send_cmd_response(
                             device_itf,
                             config.string_descriptors[i].data,
-                            setup.length,
+                            setup.length.into_len(),
                         );
                 },
                 .Interface => {
@@ -385,7 +386,7 @@ pub fn DeviceController(config: Config) type {
                     // We will just copy parts of the DeviceDescriptor because
                     // the DeviceQualifierDescriptor can be seen as a subset.
                     const qualifier = comptime &config.device_descriptor.qualifier();
-                    self.send_cmd_response(device_itf, @ptrCast(qualifier), setup.length);
+                    self.send_cmd_response(device_itf, @ptrCast(qualifier), setup.length.into_len());
                 },
                 else => {},
             }

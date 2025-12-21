@@ -110,9 +110,7 @@ pub const Descriptor = extern struct {
 };
 
 device: *usb.DeviceInterface,
-ep_notif: types.Endpoint.Num,
-ep_in: types.Endpoint.Num,
-ep_out: types.Endpoint.Num,
+desc: *const Descriptor,
 line_coding: LineCoding align(4),
 
 tx: FIFO = .empty,
@@ -120,7 +118,7 @@ tx: FIFO = .empty,
 epin_buf: [options_max_packet_size]u8 = undefined,
 
 pub fn read(self: *@This(), dst: []u8) usize {
-    return self.device.start_rx(self.ep_out, dst, 64) orelse 0;
+    return self.device.start_rx(self.desc.ep_out.endpoint.num, dst, 64) orelse 0;
 }
 
 pub fn write(self: *@This(), data: []const u8) []const u8 {
@@ -145,17 +143,20 @@ pub fn write_flush(self: *@This()) usize {
     }
     const len = self.tx.read(&self.epin_buf);
     // TODO: wait instead of discard
-    if (self.device.start_tx(self.ep_in, self.epin_buf[0..len]) != len)
+    if (self.device.start_tx(self.desc.ep_in.endpoint.num, self.epin_buf[0..len]) != len)
         std.log.err("data discarded", .{});
     return len;
 }
 
 pub fn init(desc: *const Descriptor, device: *usb.DeviceInterface) @This() {
+    assert(device.start_rx(
+        desc.ep_out.endpoint.num,
+        "",
+        desc.ep_out.max_packet_size.into_len(),
+    ) == 0);
     return .{
         .device = device,
-        .ep_notif = desc.ep_notifi.endpoint.num,
-        .ep_in = desc.ep_in.endpoint.num,
-        .ep_out = desc.ep_out.endpoint.num,
+        .desc = desc,
         .line_coding = .{
             .bit_rate = 115200,
             .stop_bits = 0,
@@ -184,12 +185,12 @@ pub fn class_control(self: *@This(), stage: types.ControlStage, setup: types.Set
 }
 
 pub fn transfer(self: *@This(), ep: types.Endpoint, data: []u8) void {
-    if (ep == types.Endpoint.in(self.ep_in)) {
+    if (ep == self.desc.ep_in.endpoint) {
         if (self.write_flush() == 0) {
             // If there is no data left, a empty packet should be sent if
             // data len is multiple of EP Packet size and not zero
             if (self.tx.get_readable_len() == 0 and data.len > 0 and data.len == options_max_packet_size) {
-                assert(self.device.start_tx(self.ep_in, usb.ack) == 0);
+                assert(self.device.start_tx(self.desc.ep_in.endpoint.num, usb.ack) == 0);
             }
         }
     }

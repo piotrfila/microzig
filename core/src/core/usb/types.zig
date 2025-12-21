@@ -1,6 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+pub const Len = u10;
+
 /// Class of device, giving a broad functional area.
 pub const ClassCode = enum(u8) {
     Unspecified = 0x00,
@@ -133,13 +135,13 @@ pub const SetupPacket = extern struct {
     /// conflict.
     request: u8,
     /// A simple argument of up to 16 bits, specific to the request.
-    value: u16,
+    value: U16Le,
     /// Not used in the requests we support.
-    index: u16,
+    index: U16Le,
     /// If data will be transferred after this request (in the direction given
     /// by `request_type`), this gives the number of bytes (OUT) or maximum
     /// number of bytes (IN).
-    length: u16,
+    length: U16Le,
 };
 
 /// u16 value, little endian regardless of native endianness.
@@ -154,5 +156,9 @@ pub const U16Le = extern struct {
 
     pub fn into(self: @This()) u16 {
         return std.mem.readInt(u16, &self.value, .little);
+    }
+
+    pub fn into_len(self: @This()) Len {
+        return @intCast(self.into());
     }
 };
