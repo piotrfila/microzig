@@ -11,7 +11,7 @@ const led = gpio.num(25);
 const uart = rp2xxx.uart.instance.num(0);
 const uart_tx_pin = gpio.num(0);
 
-const UsbSerial = usb.drivers.cdc.CdcClassDriver(.{ .max_packet_size = 64 });
+const UsbSerial = usb.drivers.Cdc;
 
 var usb_dev: rp2xxx.usb.Polled(
     usb.Config{
