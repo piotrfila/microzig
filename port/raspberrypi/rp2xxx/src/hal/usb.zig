@@ -13,6 +13,7 @@ const types = usb.types;
 
 const HardwareBuffer = enum(u6) {
     const size = 64;
+    const TagType = @typeInfo(@This()).@"enum".tag_type;
 
     none = 0,
     unused1 = 1,
@@ -22,8 +23,11 @@ const HardwareBuffer = enum(u6) {
     ep0_buf1 = 5,
     _,
 
-    fn from_offset(offset: u16) @This() {
-        return @enumFromInt(@divExact(offset, size));
+    var last_alloc: TagType = @intFromEnum(@This().ep0_buf1);
+
+    fn alloc() HardwareBuffer {
+        const last = @atomicRmw(TagType, &last_alloc, .Add, 1, .monotonic);
+        return @enumFromInt(last + 1);
     }
 
     fn to_offset(self: @This()) u16 {
@@ -33,9 +37,19 @@ const HardwareBuffer = enum(u6) {
     fn data(self: @This()) []u8 {
         const num_buffers = 1 << @bitSizeOf(@This());
         comptime assert(num_buffers * size == 4096);
+        // It's ok to @volatileCast because ownership transfer does not happen during access.
         const buffers: *[num_buffers][size]u8 = @ptrCast(@volatileCast(USB_DPRAM));
         return &buffers[@intFromEnum(self)];
     }
+};
+
+// While it's tempting to store this data in the unused high 16 bits
+// of buffer_control registers, errata RP2040-E4 makes this impossbile.
+const EndpointData = packed struct(u16) {
+    buffer: HardwareBuffer,
+    max_len: u10,
+
+    const init: @This() = .{ .buffer = .none, .max_len = 0 };
 };
 
 pub const Config = struct {
@@ -56,20 +70,23 @@ pub fn Polled(
             .endpoint_open = endpoint_open,
         };
 
-        endpoint_buffer: [1 << @bitSizeOf(types.Endpoint.Num)][2]HardwareBuffer,
-        last_buf_alloc: HardwareBuffer,
+        ep_data: [config.num_endpoints][2]EndpointData,
         controller: usb.DeviceController(controller_config),
         interface: usb.DeviceInterface,
 
-        pub fn get_ep_ctrl(ep: types.Endpoint) ?*volatile @TypeOf(USB_DPRAM.EP1_IN_CONTROL) {
+        fn get_ep_ctrl(ep: types.Endpoint) ?*volatile @TypeOf(USB_DPRAM.EP1_IN_CONTROL) {
             const idx = std.math.sub(u4, @intFromEnum(ep.num), 1) catch return null;
             const ep_ctrl: *volatile [config.num_endpoints - 1][2]u32 = @ptrCast(&USB_DPRAM.EP1_IN_CONTROL);
             return @ptrCast(&ep_ctrl[idx][@intFromBool(ep.dir == .Out)]);
         }
 
-        pub fn get_buf_ctrl(ep: types.Endpoint) *volatile @TypeOf(USB_DPRAM.EP0_IN_BUFFER_CONTROL) {
+        fn get_bufctrl(ep: types.Endpoint) *volatile @TypeOf(USB_DPRAM.EP0_IN_BUFFER_CONTROL) {
             const buf_ctrl: *volatile [config.num_endpoints][2]u32 = @ptrCast(&USB_DPRAM.EP0_IN_BUFFER_CONTROL);
             return @ptrCast(&buf_ctrl[@intFromEnum(ep.num)][@intFromBool(ep.dir == .Out)]);
+        }
+
+        fn get_ep_data(self: *@This(), ep: types.Endpoint) *EndpointData {
+            return &self.ep_data[@intFromEnum(ep.num)][@intFromEnum(ep.dir)];
         }
 
         pub fn poll(self: *@This()) void {
@@ -80,7 +97,7 @@ pub fn Polled(
             if (ints.SETUP_REQ != 0) {
                 // Reset PID to 1 for EP0 IN. Every DATA packet we send in response
                 // to an IN on EP0 needs to use PID DATA1.
-                get_buf_ctrl(.in(.ep0)).modify(.{ .PID_0 = 0 });
+                get_bufctrl(.in(.ep0)).modify(.{ .PID_0 = 0 });
 
                 // Copy the setup packet out of its dedicated buffer.
                 const setup: types.SetupPacket = @bitCast([2]u32{
@@ -117,11 +134,9 @@ pub fn Polled(
                     const ep: types.Endpoint = .{ .num = @enumFromInt(epnum), .dir = dir };
 
                     // Process the buffer-done event.
-                    const buffer = self.ep_to_buffer(ep);
-                    const bufctrl_ptr = get_buf_ctrl(ep);
-                    const len = bufctrl_ptr.read().LENGTH_0;
-
-                    self.controller.on_buffer(&self.interface, ep, buffer.data()[0..len]);
+                    const data = self.get_ep_data(ep).buffer.data();
+                    const len = get_bufctrl(ep).read().LENGTH_0;
+                    self.controller.on_buffer(&self.interface, ep, data[0..len]);
                 }
 
                 USB.BUFF_STATUS.write_raw(bufbits_init);
@@ -186,14 +201,17 @@ pub fn Polled(
             });
 
             var self: @This() = .{
-                .endpoint_buffer = @splat(@splat(.none)),
-                .last_buf_alloc = .ep0_buf1,
+                .ep_data = @splat(@splat(.init)),
                 .interface = .{ .vtable = &vtable },
                 .controller = .init,
             };
 
-            self.ep_to_buffer(.in(.ep0)).* = .ep0_buf0;
-            self.ep_to_buffer(.out(.ep0)).* = .ep0_buf0;
+            const ep0_data: EndpointData = .{
+                .buffer = .ep0_buf0,
+                .max_len = config.max_packet_size,
+            };
+            self.get_ep_data(.in(.ep0)).* = ep0_data;
+            self.get_ep_data(.out(.ep0)).* = ep0_data;
 
             // Present full-speed device by enabling pullup on DP. This is the point
             // where the host will notice our presence.
@@ -218,7 +236,7 @@ pub fn Polled(
             // TODO: assert!(buffer.len() <= 64);
 
             // Acquire buffer ownership
-            const bufctrl_ptr = get_buf_ctrl(.in(ep_num));
+            const bufctrl_ptr = get_bufctrl(.in(ep_num));
             var bufctrl = bufctrl_ptr.read();
             if (bufctrl.AVAILABLE_0 == 1)
                 return null;
@@ -228,14 +246,15 @@ pub fn Polled(
             bufctrl = bufctrl_ptr.read();
 
             const self: *@This() = @fieldParentPtr("interface", itf);
-            const buffer = self.ep_to_buffer(.in(ep_num));
+            const ep_data = self.get_ep_data(.in(ep_num));
+            const len = @min(ep_data.max_len, data.len);
             // TODO: please fixme: https://github.com/ZigEmbeddedGroup/microzig/issues/452
-            std.mem.copyForwards(u8, buffer.data(), data);
+            std.mem.copyForwards(u8, ep_data.buffer.data()[0..len], data[0..len]);
 
             // Configure buffer
             bufctrl.PID_0 ^= 1;
             bufctrl.FULL_0 = 1; // We have put data in
-            bufctrl.LENGTH_0 = @intCast(data.len); // There are this many bytes
+            bufctrl.LENGTH_0 = @intCast(len); // There are this many bytes
             bufctrl_ptr.write(bufctrl);
 
             // Nop for some clock cycles for synchronization and transfer ownership
@@ -243,7 +262,7 @@ pub fn Polled(
             bufctrl.AVAILABLE_0 = 1;
             bufctrl_ptr.write(bufctrl);
 
-            return @min(data.len, HardwareBuffer.size);
+            return len;
         }
 
         fn start_rx(
@@ -253,7 +272,7 @@ pub fn Polled(
             request_len: ?u10,
         ) ?usize {
             // Acquire buffer ownership
-            const bufctrl_ptr = get_buf_ctrl(.out(ep_num));
+            const bufctrl_ptr = get_bufctrl(.out(ep_num));
             var bufctrl = bufctrl_ptr.read();
             if (bufctrl.AVAILABLE_0 == 1) return null;
 
@@ -263,21 +282,20 @@ pub fn Polled(
 
             // Configure the OUT:
             bufctrl.PID_0 ^= 1; // Flip DATA0/1
+            const self: *@This() = @fieldParentPtr("interface", itf);
+            const ep_data = self.get_ep_data(.out(ep_num));
             const ret = if (bufctrl.FULL_0 == 0)
                 0
             else blk: {
-                const self: *@This() = @fieldParentPtr("interface", itf);
-                const buffer = self.ep_to_buffer(.out(ep_num));
-
                 const len = @min(data.len, bufctrl.LENGTH_0);
                 if (data.len < len)
                     std.log.err("discarded rx data", .{});
-                std.mem.copyForwards(u8, data[0..len], buffer.data()[0..len]);
+                std.mem.copyForwards(u8, data[0..len], ep_data.buffer.data()[0..len]);
                 break :blk len;
             };
             bufctrl.FULL_0 = 0; // Buffer is NOT full, we want the computer to fill it
             if (request_len) |len| {
-                bufctrl.LENGTH_0 = len; // Up tho this many bytes
+                bufctrl.LENGTH_0 = @min(len, ep_data.max_len); // Up tho this many bytes
                 bufctrl_ptr.write(bufctrl);
 
                 // Nop for some clock cycles for synchronization and release ownership
@@ -293,32 +311,29 @@ pub fn Polled(
             USB.ADDR_ENDP.configure(.{ .ADDRESS = addr });
         }
 
-        fn ep_to_buffer(self: *@This(), ep: types.Endpoint) *HardwareBuffer {
-            return &self.endpoint_buffer[@intFromEnum(ep.num)][@intFromEnum(ep.dir)];
-        }
-
         fn endpoint_open(itf: *usb.DeviceInterface, desc: *const usb.descriptor.Endpoint) void {
             const self: *@This() = @fieldParentPtr("interface", itf);
 
             const ep = desc.endpoint;
-            const buffer = self.ep_to_buffer(ep);
+            const ep_data = self.get_ep_data(ep);
 
-            const ep_ctrl_ptr = get_ep_ctrl(ep).?;
-            // round up size to multiple of 64
-            const chunks = std.math.divCeil(
-                u16,
-                desc.max_packet_size.into(),
-                HardwareBuffer.size,
-            ) catch unreachable;
-            buffer.* = @enumFromInt(@intFromEnum(self.last_buf_alloc) + 1);
-            self.last_buf_alloc = @enumFromInt(@intFromEnum(self.last_buf_alloc) + chunks);
+            if (ep_data.buffer != .none)
+                std.debug.panic("endpoint configured twice:\n{any}\n", .{desc.*});
 
-            var ep_ctrl = ep_ctrl_ptr.read();
-            ep_ctrl.ENABLE = 1;
-            ep_ctrl.INTERRUPT_PER_BUFF = 1;
-            ep_ctrl.ENDPOINT_TYPE = @enumFromInt(@intFromEnum(desc.attributes.transfer_type));
-            ep_ctrl.BUFFER_ADDRESS = buffer.to_offset();
-            ep_ctrl_ptr.write(ep_ctrl);
+            ep_data.* = .{
+                .buffer = .alloc(),
+                .max_len = desc.max_packet_size.into_len(),
+            };
+            assert(ep_data.buffer.data().len >= desc.max_packet_size.into_len());
+
+            const EndpointType = microzig.chip.types.peripherals.USB_DPRAM.EndpointType;
+
+            get_ep_ctrl(ep).?.configure(.{
+                .ENABLE = 1,
+                .INTERRUPT_PER_BUFF = 1,
+                .ENDPOINT_TYPE = @as(EndpointType, @enumFromInt(@intFromEnum(desc.attributes.transfer_type))),
+                .BUFFER_ADDRESS = ep_data.buffer.to_offset(),
+            });
         }
     };
 }
