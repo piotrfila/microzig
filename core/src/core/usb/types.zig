@@ -146,16 +146,14 @@ pub const SetupPacket = extern struct {
 
 /// u16 value, little endian regardless of native endianness.
 pub const U16Le = extern struct {
-    value: [2]u8,
+    value_le: u16 align(1),
 
     pub fn from(val: u16) @This() {
-        var self: @This() = undefined;
-        std.mem.writeInt(u16, &self.value, val, .little);
-        return self;
+        return .{ .value_le = std.mem.nativeToLittle(u16, val) };
     }
 
     pub fn into(self: @This()) u16 {
-        return std.mem.readInt(u16, &self.value, .little);
+        return std.mem.littleToNative(u16, self.value_le);
     }
 
     pub fn into_len(self: @This()) Len {

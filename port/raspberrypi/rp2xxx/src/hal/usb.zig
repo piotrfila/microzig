@@ -288,6 +288,7 @@ pub fn Polled(
                 0
             else blk: {
                 const len = @min(data.len, bufctrl.LENGTH_0);
+                // TODO: Partial reads
                 if (data.len < len)
                     std.log.err("discarded rx data", .{});
                 std.mem.copyForwards(u8, data[0..len], ep_data.buffer.data()[0..len]);
