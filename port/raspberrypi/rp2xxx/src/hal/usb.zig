@@ -64,8 +64,8 @@ pub fn Polled(
 ) type {
     return struct {
         const vtable: usb.DeviceInterface.VTable = .{
-            .start_tx = start_tx,
-            .start_rx = start_rx,
+            .ep_writev = ep_writev,
+            .ep_readv = ep_readv,
             .set_address = set_address,
             .endpoint_open = endpoint_open,
         };
@@ -226,14 +226,16 @@ pub fn Polled(
         /// The contents of `buffer` will be _copied_ into USB SRAM, so you can
         /// reuse `buffer` immediately after this returns. No need to wait for the
         /// packet to be sent.
-        fn start_tx(
+        fn ep_writev(
             itf: *usb.DeviceInterface,
             ep_num: types.Endpoint.Num,
-            data: []const u8,
+            buffers: [][]const u8,
         ) ?usize {
             // It is technically possible to support longer buffers but this demo
             // doesn't bother.
             // TODO: assert!(buffer.len() <= 64);
+
+            const data = buffers[0];
 
             // Acquire buffer ownership
             const bufctrl_ptr = get_bufctrl(.in(ep_num));
@@ -265,12 +267,14 @@ pub fn Polled(
             return len;
         }
 
-        fn start_rx(
+        fn ep_readv(
             itf: *usb.DeviceInterface,
             ep_num: types.Endpoint.Num,
-            data: []u8,
+            buffers: [][]u8,
             request_len: ?u10,
         ) ?usize {
+            const data = buffers[0];
+
             // Acquire buffer ownership
             const bufctrl_ptr = get_bufctrl(.out(ep_num));
             var bufctrl = bufctrl_ptr.read();

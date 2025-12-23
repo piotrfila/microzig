@@ -17,26 +17,39 @@ pub const no_len_limit: comptime_int = std.math.maxInt(types.Len);
 /// Any device implementation used with DeviceController must implement those functions
 pub const DeviceInterface = struct {
     pub const VTable = struct {
-        start_tx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, data: []const u8) ?usize,
-        start_rx: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, data: []u8, request_len: ?types.Len) ?usize,
+        ep_writev: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, buffers: [][]const u8) ?usize,
+        ep_readv: *const fn (self: *DeviceInterface, ep_num: types.Endpoint.Num, buffers: [][]u8, request_len: ?types.Len) ?usize,
         endpoint_open: *const fn (self: *DeviceInterface, desc: *const descriptor.Endpoint) void,
         set_address: *const fn (self: *DeviceInterface, addr: u7) void,
     };
 
     vtable: *const VTable,
 
+    // TODO: documentation
+    pub fn ep_writev(self: *@This(), ep_num: types.Endpoint.Num, buffers: [][]const u8) ?usize {
+        return self.vtable.ep_writev(self, ep_num, buffers);
+    }
+
+    // TODO: documentation
+    pub fn ep_readv(self: *@This(), ep_num: types.Endpoint.Num, buffers: [][]u8, request_len: ?u10) ?usize {
+        return self.vtable.ep_readv(self, ep_num, buffers, request_len);
+    }
+
     /// Called by drivers to send a packet.
     /// Submitting an empty slice signals an ACK.
     /// If you intend to send ACK, please use the constant `usb.ack`.
     /// Returns null if transmit queue is full, otherwise the number of bytes sent.
-    pub fn start_tx(self: *@This(), ep_num: types.Endpoint.Num, data: []const u8) ?usize {
-        return self.vtable.start_tx(self, ep_num, data);
+    pub fn ep_write(self: *@This(), ep_num: types.Endpoint.Num, data: []const u8) ?usize {
+        var buffers: [1][]const u8 = .{data};
+        return ep_writev(self, ep_num, &buffers);
     }
 
+    // TODO: documentation
     /// Called by drivers to report readiness to receive up to `len` bytes.
     /// Must be called exactly once before each packet.
-    pub fn start_rx(self: *@This(), ep_num: types.Endpoint.Num, data: []u8, request_len: ?u10) ?usize {
-        return self.vtable.start_rx(self, ep_num, data, request_len);
+    pub fn ep_read(self: *@This(), ep_num: types.Endpoint.Num, data: []u8, request_len: ?u10) ?usize {
+        var buffers: [1][]u8 = .{data};
+        return ep_readv(self, ep_num, &buffers, request_len);
     }
 
     /// Opens an endpoint according to the descriptor. Note that if the endpoint
@@ -241,9 +254,9 @@ pub fn DeviceController(config: Config) type {
 
                         const next_data_chunk = self.tx_slice[0..@min(64, self.tx_slice.len)];
                         if (next_data_chunk.len > 0) {
-                            assert(device_itf.start_tx(.ep0, next_data_chunk) == next_data_chunk.len);
+                            assert(device_itf.ep_write(.ep0, next_data_chunk) == next_data_chunk.len);
                         } else {
-                            _ = device_itf.start_rx(.ep0, "", 0);
+                            _ = device_itf.ep_read(.ep0, "", 0);
 
                             if (self.driver_last) |drv|
                                 self.driver_class_control(device_itf, drv, .Ack, self.setup_packet);
@@ -254,7 +267,7 @@ pub fn DeviceController(config: Config) type {
                         // status phase where the host sends us (via EP0
                         // OUT) a zero-byte DATA packet, so, set that
                         // up:
-                        _ = device_itf.start_rx(.ep0, "", 0);
+                        _ = device_itf.ep_read(.ep0, "", 0);
 
                         if (self.driver_last) |drv|
                             self.driver_class_control(device_itf, drv, .Ack, self.setup_packet);
@@ -288,7 +301,7 @@ pub fn DeviceController(config: Config) type {
         fn send_cmd_response(self: *@This(), device_itf: *DeviceInterface, data: []const u8, expected_max_length: types.Len) void {
             self.tx_slice = data[0..@min(data.len, expected_max_length)];
             const len = @min(config.device_descriptor.max_packet_size0, self.tx_slice.len);
-            assert(device_itf.start_tx(.ep0, data[0..len]) == len);
+            assert(device_itf.ep_write(.ep0, data[0..len]) == len);
         }
 
         fn driver_class_control(self: *@This(), device_itf: *DeviceInterface, driver: DriverEnum, stage: types.ControlStage, setup: types.SetupPacket) void {
@@ -311,7 +324,7 @@ pub fn DeviceController(config: Config) type {
                     switch (std.meta.intToEnum(types.SetupRequest, setup.request) catch return) {
                         .SetAddress => {
                             self.new_address = @truncate(setup.value.into());
-                            assert(device_itf.start_tx(.ep0, ack) == 0);
+                            assert(device_itf.ep_write(.ep0, ack) == 0);
                             if (config.debug) log.info("    SetAddress: {}", .{self.new_address.?});
                         },
                         .SetConfiguration => {
@@ -326,7 +339,7 @@ pub fn DeviceController(config: Config) type {
                                     // TODO: call umount callback if any
                                 }
                             }
-                            assert(device_itf.start_tx(.ep0, ack) == 0);
+                            assert(device_itf.ep_write(.ep0, ack) == 0);
                         },
                         .GetDescriptor => {
                             const descriptor_type = std.meta.intToEnum(descriptor.Type, setup.value.into() >> 8) catch null;
@@ -337,7 +350,7 @@ pub fn DeviceController(config: Config) type {
                         .SetFeature => {
                             if (std.meta.intToEnum(types.FeatureSelector, setup.value.into() >> 8)) |feat| {
                                 switch (feat) {
-                                    .DeviceRemoteWakeup, .EndpointHalt => assert(device_itf.start_tx(.ep0, ack) == 0),
+                                    .DeviceRemoteWakeup, .EndpointHalt => assert(device_itf.ep_write(.ep0, ack) == 0),
                                     // TODO: https://github.com/ZigEmbeddedGroup/microzig/issues/453
                                     .TestMode => {},
                                 }

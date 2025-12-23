@@ -121,7 +121,7 @@ epin_buf: [options_max_packet_size]u8 = undefined,
 var tx_buffer: [64]u8 align(64) = undefined;
 
 pub fn read(self: *@This(), dst: []u8) usize {
-    return self.device.start_rx(self.desc.ep_out.endpoint.num, dst, 64) orelse 0;
+    return self.device.ep_read(self.desc.ep_out.endpoint.num, dst, 64) orelse 0;
 }
 
 pub fn write(self: *@This(), data: []const u8) []const u8 {
@@ -147,14 +147,14 @@ pub fn write_flush(self: *@This()) usize {
     std.log.info("{any}", .{self.tx});
     const len = self.tx.read(&self.epin_buf);
     // TODO: wait instead of discard
-    if (self.device.start_tx(self.desc.ep_in.endpoint.num, self.epin_buf[0..len]) != len)
+    if (self.device.ep_write(self.desc.ep_in.endpoint.num, self.epin_buf[0..len]) != len)
         std.log.err("data discarded", .{});
     std.log.info("{any} {}", .{ self.tx, len });
     return len;
 }
 
 pub fn init(desc: *const Descriptor, device: *usb.DeviceInterface) @This() {
-    assert(device.start_rx(
+    assert(device.ep_read(
         desc.ep_out.endpoint.num,
         "",
         desc.ep_out.max_packet_size.into_len(),
@@ -196,7 +196,7 @@ pub fn transfer(self: *@This(), ep: types.Endpoint, data: []u8) void {
             // If there is no data left, a empty packet should be sent if
             // data len is multiple of EP Packet size and not zero
             if (self.tx.get_readable_len() == 0 and data.len > 0 and data.len == options_max_packet_size) {
-                assert(self.device.start_tx(self.desc.ep_in.endpoint.num, usb.ack) == 0);
+                assert(self.device.ep_write(self.desc.ep_in.endpoint.num, usb.ack) == 0);
             }
         }
     }
