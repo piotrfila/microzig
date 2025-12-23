@@ -29,7 +29,7 @@ pub const LineCoding = extern struct {
 
 const options_max_packet_size = 64;
 
-const FIFO = utilities.CircularBuffer(u8, options_max_packet_size);
+const FIFO = utilities.CircularBuffer(u8, 2 * options_max_packet_size);
 
 pub const Descriptor = extern struct {
     itf_assoc: descriptor.InterfaceAssociation,
