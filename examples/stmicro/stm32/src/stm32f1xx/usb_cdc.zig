@@ -185,7 +185,8 @@ const SerialState = packed struct(u8) {
 
 //=============== USB DATA =================
 var USB_RX_BUFFER: [64]u8 = undefined;
-var CDC_fifo: microzig.utilities.CircularBuffer(u8, 64) = .empty;
+var CDC_fifo_buffer: [64]u8 align(64) = undefined;
+var CDC_fifo: microzig.utilities.Queue = undefined;
 var device_addr: ?u7 = null;
 var remain_pkg: ?[]const u8 = null;
 var config: bool = false;
@@ -318,7 +319,7 @@ fn ep3_rx(epc: EpControl, _: ?*anyopaque) void {
     const recv = epc.USB_read(.no_change) catch unreachable;
     const free_data = CDC_fifo.get_writable_len();
     const to_write = @min(recv.len, free_data);
-    CDC_fifo.write_assume_capacity(recv[0..to_write]);
+    CDC_fifo.write(recv[0..to_write]) catch unreachable;
 }
 
 //=============== USB FUNC =================
@@ -429,7 +430,7 @@ pub fn main() !void {
 
     const led = gpio.Pin.from_port(.B, 2);
     led.set_output_mode(.general_purpose_push_pull, .max_50MHz);
-    CDC_fifo.reset();
+    CDC_fifo = .init(CDC_fifo_buffer.len, &CDC_fifo_buffer);
 
     //NOTE: the stm32f103 does not have an internal 1.5k pull-up resistor for USB, you must add one externally
     usb_ll.usb_init(USB_conf, Duration.from_ms(25));

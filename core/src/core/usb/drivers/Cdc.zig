@@ -29,7 +29,7 @@ pub const LineCoding = extern struct {
 
 const options_max_packet_size = 64;
 
-const FIFO = utilities.CircularBuffer(u8, 2 * options_max_packet_size);
+const FIFO = utilities.Queue;
 
 pub const Descriptor = extern struct {
     itf_assoc: descriptor.InterfaceAssociation,
@@ -113,9 +113,12 @@ device: *usb.DeviceInterface,
 desc: *const Descriptor,
 line_coding: LineCoding align(4),
 
-tx: FIFO = .empty,
+tx: FIFO,
 
 epin_buf: [options_max_packet_size]u8 = undefined,
+
+// TODO: this is terrible
+var tx_buffer: [64]u8 align(64) = undefined;
 
 pub fn read(self: *@This(), dst: []u8) usize {
     return self.device.start_rx(self.desc.ep_out.endpoint.num, dst, 64) orelse 0;
@@ -125,7 +128,7 @@ pub fn write(self: *@This(), data: []const u8) []const u8 {
     const write_count = @min(self.tx.get_writable_len(), data.len);
 
     if (write_count > 0) {
-        self.tx.write_assume_capacity(data[0..write_count]);
+        self.tx.write(data[0..write_count]) catch unreachable;
     } else {
         return data[0..];
     }
@@ -141,10 +144,12 @@ pub fn write_flush(self: *@This()) usize {
     if (self.tx.get_readable_len() == 0) {
         return 0;
     }
+    std.log.info("{any}", .{self.tx});
     const len = self.tx.read(&self.epin_buf);
     // TODO: wait instead of discard
     if (self.device.start_tx(self.desc.ep_in.endpoint.num, self.epin_buf[0..len]) != len)
         std.log.err("data discarded", .{});
+    std.log.info("{any} {}", .{ self.tx, len });
     return len;
 }
 
@@ -157,6 +162,7 @@ pub fn init(desc: *const Descriptor, device: *usb.DeviceInterface) @This() {
     return .{
         .device = device,
         .desc = desc,
+        .tx = .init(tx_buffer.len, &tx_buffer),
         .line_coding = .{
             .bit_rate = 115200,
             .stop_bits = 0,

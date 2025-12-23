@@ -508,134 +508,97 @@ pub fn get_end_of_stack() *const anyopaque {
     }
 }
 
-/// A naive circular buffer implementation. At time of writing, it's intended
-/// to fill in where the deleted std.fifo.LinearFifo was used, so the API might
-/// seem unfinished.
-pub fn CircularBuffer(comptime T: type, comptime len: usize) type {
-    return struct {
-        items: [len]T,
-        start: usize,
-        end: usize,
-        full: bool,
+/// Only power of 2 buffer sizes from 2 up to 2^16 are supported.
+pub const Queue = struct {
+    items: []u8,
+    start: usize,
+    end: usize,
+    full: bool,
 
-        const Self = @This();
-        pub const empty: Self = .{
-            .items = undefined,
+    pub fn init(len: comptime_int, buffer: []align(len) u8) @This() {
+        assert(len >= 2);
+        assert(len <= 1 << 16);
+        assert(std.math.isPowerOfTwo(len));
+        return .{
+            .items = buffer,
             .start = 0,
             .end = 0,
             .full = false,
         };
+    }
 
-        fn assert_valid(buffer: *const Self) void {
-            assert(buffer.start < len);
-            assert(buffer.end < len);
+    fn assert_valid(self: *const @This()) void {
+        assert(self.start < self.items.len);
+        assert(self.end < self.items.len);
+    }
+
+    pub fn get_writable_len(self: *const @This()) usize {
+        self.assert_valid();
+        return self.items.len - self.get_readable_len();
+    }
+
+    pub fn get_readable_len(self: *const @This()) usize {
+        self.assert_valid();
+        if (self.full)
+            return self.items.len;
+        return if (self.start <= self.end)
+            self.end - self.start
+        else
+            self.items.len - self.start + self.end;
+    }
+
+    fn advance_start(self: *@This(), n: usize) void {
+        self.start = (self.start +% n) & (self.items.len - 1);
+        if (n != 0)
+            self.full = false;
+    }
+
+    fn advance_end(self: *@This(), n: usize) void {
+        self.end = (self.end +% n) & (self.items.len - 1);
+        if (self.start == self.end)
+            self.full = true;
+    }
+
+    pub fn peek(self: *@This()) struct { []u8, []u8 } {
+        if (self.start == self.end and !self.full)
+            return .{ "", "" }
+        else if (self.start < self.end)
+            return .{ self.items[self.start..self.end], "" }
+        else
+            return .{ self.items[self.start..], self.items[0..self.end] };
+    }
+
+    pub fn read(self: *@This(), out: []u8) usize {
+        const part1, const part2 = self.peek();
+
+        const len = if (std.math.sub(usize, out.len, part1.len)) |out2_len| blk: {
+            @memcpy(out[0..part1.len], part1);
+            const len = @min(out2_len, part2.len);
+            @memcpy(out[part1.len .. part1.len + len], part2[0..len]);
+            self.advance_start(part1.len + len);
+            break :blk part1.len + len;
+        } else |_| blk: {
+            @memcpy(out, part1[0..out.len]);
+            self.advance_start(out.len);
+            break :blk out.len;
+        };
+
+        for (0..2000) |_|
+            asm volatile ("nop");
+
+        return len;
+    }
+
+    pub fn write(self: *@This(), data: []const u8) error{Full}!void {
+        self.assert_valid();
+        defer self.assert_valid();
+
+        for (data) |d| {
+            if (self.full)
+                return error.Full;
+
+            self.items[self.end] = d;
+            self.advance_end(1);
         }
-
-        pub fn get_writable_len(buffer: *const Self) usize {
-            buffer.assert_valid();
-            return len - buffer.get_readable_len();
-        }
-
-        pub fn is_empty(buffer: *const Self) bool {
-            return !buffer.full and (buffer.start == buffer.end);
-        }
-
-        pub fn get_readable_len(buffer: *const Self) usize {
-            buffer.assert_valid();
-            if (buffer.full)
-                return len;
-            return if (buffer.start <= buffer.end)
-                buffer.end - buffer.start
-            else
-                len - buffer.start + buffer.end;
-        }
-
-        fn increment_end(buffer: *Self) void {
-            increment(&buffer.end);
-        }
-
-        fn increment_start(buffer: *Self) void {
-            increment(&buffer.start);
-        }
-
-        fn increment(counter: *usize) void {
-            if (counter.* >= (len - 1)) {
-                counter.* = 0;
-            } else {
-                counter.* += 1;
-            }
-        }
-
-        pub fn write_assume_capacity(buffer: *Self, values: []const T) void {
-            buffer.assert_valid();
-            defer buffer.assert_valid();
-
-            var first = true;
-            for (values) |value| {
-                if (first) {
-                    first = false;
-                } else {
-                    assert(buffer.start != buffer.end);
-                }
-
-                buffer.items[buffer.end] = value;
-                buffer.increment_end();
-            }
-
-            if (buffer.start == buffer.end)
-                buffer.full = true;
-        }
-
-        pub fn read(buffer: *Self, out: []u8) usize {
-            buffer.assert_valid();
-            defer buffer.assert_valid();
-
-            var count: usize = 0;
-            while (!buffer.is_empty() and count < out.len) {
-                out[count] = buffer.pop().?;
-                count += 1;
-            }
-
-            return count;
-        }
-
-        pub fn write(buffer: *Self, data: []const u8) error{Full}!void {
-            buffer.assert_valid();
-            defer buffer.assert_valid();
-
-            for (data) |d| {
-                if (buffer.full)
-                    return error.Full;
-
-                buffer.items[buffer.end] = d;
-                buffer.increment_end();
-            }
-        }
-
-        /// Pop item from front of buffer. Return null if empty
-        pub fn pop(buffer: *Self) ?T {
-            buffer.assert_valid();
-            defer buffer.assert_valid();
-
-            if (buffer.is_empty())
-                return null;
-
-            defer {
-                buffer.increment_start();
-                if (buffer.full) {
-                    buffer.full = false;
-                }
-            }
-            return buffer.items[buffer.start];
-        }
-
-        pub fn reset(buffer: *Self) void {
-            buffer.assert_valid();
-            defer buffer.assert_valid();
-
-            buffer.start = 0;
-            buffer.end = 0;
-            buffer.full = false;
-        }
-    };
-}
+    }
+};
