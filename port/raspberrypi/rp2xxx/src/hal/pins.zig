@@ -770,30 +770,21 @@ pub const GlobalConfiguration = struct {
         var fields: []const StructField = &.{};
         for (@typeInfo(GlobalConfiguration).@"struct".fields) |field| {
             if (@field(self, field.name)) |pin_config| {
-                var pin_field = StructField{
+                fields = fields ++ &[_]StructField{.{
                     .is_comptime = false,
                     .default_value_ptr = null,
 
-                    // initialized below:
-                    .name = undefined,
-                    .type = undefined,
-                    .alignment = undefined,
-                };
-
-                pin_field.name = pin_config.name orelse field.name;
-                if (pin_config.function == .SIO) {
-                    pin_field.type = gpio.Pin;
-                } else if (pin_config.function.is_pwm()) {
-                    pin_field.type = pwm.Pwm;
-                } else if (pin_config.function.is_adc()) {
-                    pin_field.type = adc.Input;
-                } else {
-                    continue;
-                }
-
-                pin_field.alignment = @alignOf(field.type);
-
-                fields = fields ++ &[_]StructField{pin_field};
+                    .name = pin_config.name orelse field.name,
+                    .type = if (pin_config.function == .SIO)
+                        gpio.Pin
+                    else if (pin_config.function.is_pwm())
+                        pwm.Pwm
+                    else if (pin_config.function.is_adc())
+                        adc.Input
+                    else
+                        continue,
+                    .alignment = @alignOf(field.type),
+                }};
             }
         }
 
@@ -812,30 +803,30 @@ pub const GlobalConfiguration = struct {
     /// Can be called at comptime or runtime
     pub fn pins(comptime self: GlobalConfiguration) self.PinsType() {
         var ret: self.PinsType() = undefined;
+
         inline for (@typeInfo(GlobalConfiguration).@"struct".fields) |field| {
             if (@field(self, field.name)) |pin_config| {
                 const cname = pin_config.name orelse field.name;
-                if (@hasField(self.PinsType(), cname)) {
-                    if (pin_config.function == .SIO) {
-                        @field(ret, cname) = gpio.num(@intFromEnum(@field(Pin, field.name)));
-                    } else if (pin_config.function.is_pwm()) {
-                        @field(ret, cname) = pwm.Pwm{
-                            .slice_number = pin_config.function.pwm_slice(),
-                            .channel = pin_config.function.pwm_channel(),
-                        };
-                    } else if (pin_config.function.is_adc()) {
-                        @field(ret, cname) = @as(adc.Input, @enumFromInt(switch (pin_config.function) {
-                            .ADC0 => 0,
-                            .ADC1 => 1,
-                            .ADC2 => 2,
-                            .ADC3 => 3,
-                            .ADC4 => 4,
-                            .ADC5 => 5,
-                            .ADC6 => 6,
-                            .ADC7 => 7,
-                            else => unreachable,
-                        }));
-                    }
+
+                if (comptime pin_config.function == .SIO) {
+                    @field(ret, cname) = gpio.num(@intFromEnum(@field(Pin, field.name)));
+                } else if (comptime pin_config.function.is_pwm()) {
+                    @field(ret, cname) = pwm.Pwm{
+                        .slice_number = pin_config.function.pwm_slice(),
+                        .channel = pin_config.function.pwm_channel(),
+                    };
+                } else if (comptime pin_config.function.is_adc()) {
+                    @field(ret, cname) = @as(adc.Input, @enumFromInt(switch (pin_config.function) {
+                        .ADC0 => 0,
+                        .ADC1 => 1,
+                        .ADC2 => 2,
+                        .ADC3 => 3,
+                        .ADC4 => 4,
+                        .ADC5 => 5,
+                        .ADC6 => 6,
+                        .ADC7 => 7,
+                        else => unreachable,
+                    }));
                 }
             }
         }
