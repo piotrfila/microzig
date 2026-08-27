@@ -1249,20 +1249,21 @@ fn display_diff(wnd: *RegzWindow, file_diffs: []const FileDiff, sel: SelectedPat
     }
 
     // Build unified diff format text
-    var diff_text: std.ArrayList(u8) = .empty;
-    defer diff_text.deinit(wnd.gpa);
+    var writer: std.Io.Writer.Allocating = .init(wnd.gpa);
+    defer writer.deinit();
+    const w = &writer.writer;
 
     for (file_diffs) |fd| {
         // Unified diff file headers
-        diff_text.appendSlice(wnd.gpa, "--- a/") catch continue;
-        diff_text.appendSlice(wnd.gpa, fd.filename) catch continue;
-        diff_text.append(wnd.gpa, '\n') catch continue;
-        diff_text.appendSlice(wnd.gpa, "+++ b/") catch continue;
-        diff_text.appendSlice(wnd.gpa, fd.filename) catch continue;
-        diff_text.append(wnd.gpa, '\n') catch continue;
+        w.writeAll("--- a/") catch continue;
+        w.writeAll(fd.filename) catch continue;
+        w.writeByte('\n') catch continue;
+        w.writeAll("+++ b/") catch continue;
+        w.writeAll(fd.filename) catch continue;
+        w.writeByte('\n') catch continue;
 
         // Hunk header (simplified - just use @@ -1 +1 @@)
-        diff_text.appendSlice(wnd.gpa, "@@ -1 +1 @@\n") catch continue;
+        w.writeAll("@@ -1 +1 @@\n") catch continue;
 
         // Diff lines
         for (fd.lines) |line| {
@@ -1271,16 +1272,16 @@ fn display_diff(wnd: *RegzWindow, file_diffs: []const FileDiff, sel: SelectedPat
                 .added => '+',
                 .removed => '-',
             };
-            diff_text.append(wnd.gpa, prefix) catch continue;
-            diff_text.appendSlice(wnd.gpa, line.text) catch continue;
-            diff_text.append(wnd.gpa, '\n') catch continue;
+            w.writeByte(prefix) catch continue;
+            w.writeAll(line.text) catch continue;
+            w.writeByte('\n') catch continue;
         }
-        diff_text.append(wnd.gpa, '\n') catch continue;
+        w.writeByte('\n') catch continue;
     }
 
     // Copy button at the top
     if (dvui.button(@src(), "Copy Diff", .{}, .{})) {
-        dvui.clipboardTextSet(diff_text.items);
+        dvui.clipboardTextSet(w.buffered());
     }
 
     _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = 8 } });
@@ -1305,7 +1306,7 @@ fn display_diff(wnd: *RegzWindow, file_diffs: []const FileDiff, sel: SelectedPat
 
         // Always set text content on first frame of this widget (unique per patch)
         if (dvui.firstFrame(te.data().id)) {
-            te.textSet(diff_text.items, false);
+            te.textSet(w.buffered(), false);
             te.textLayout.selection.moveCursor(0, false);
         }
 
