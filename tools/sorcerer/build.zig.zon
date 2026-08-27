@@ -1,6 +1,8 @@
 .{
     .name = .sorcerer,
+    .fingerprint = 0x5f77e0bc82473a35,
     .version = "0.0.1",
+    .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .microzig = .{
             .path = "../..",
@@ -8,10 +10,6 @@
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui#0ca4d5c7a7915ee53a7f69c7facb8b48b7807f40",
             .hash = "dvui-0.4.0-dev-AQFJmc3h2gBHoPtLm2KO1NEWuqV-kPm1cusWeY6OkHKf",
-        },
-        .serial = .{
-            .url = "git+https://github.com/ZigEmbeddedGroup/serial#fbd7389ff8bbc9fa362aa74081588755b5d028a0",
-            .hash = "serial-0.0.1-PoeRzF60AAAN8Iu0yXTIX-t3DVzsnmN7vWHKM2HA2Zbq",
         },
         .tree_sitter_zig = .{
             .url = "git+https://github.com/tree-sitter-grammars/tree-sitter-zig#6479aa13f32f701c383083d8b28360ebd682fb7d",
@@ -26,8 +24,6 @@
             .hash = "diffz-0.0.1-G2tlIQrOAQCfH15jdyaLyrMgV8eGPouFhkCeYFTmJaLk",
         },
     },
-    .minimum_zig_version = "0.15.2",
-    .fingerprint = 0x5f77e0bc82473a35,
     .paths = .{
         "README.md",
         "build.zig",

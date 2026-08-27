@@ -77,13 +77,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const serial_dep = b.dependency("serial", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     const dvui_mod = dvui_dep.module("dvui_sdl3");
-    const serial_mod = serial_dep.module("serial");
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -97,10 +91,6 @@ pub fn build(b: *std.Build) void {
             .{
                 .name = "regz",
                 .module = regz_mod,
-            },
-            .{
-                .name = "serial",
-                .module = serial_mod,
             },
             .{
                 .name = "schemas",
