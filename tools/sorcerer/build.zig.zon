@@ -5,7 +5,8 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .microzig = .{
-            .path = "../..",
+            .url = "git+https://github.com/ZigEmbeddedGroup/microzig#7e47e82d9e90af6f52a70fe50c7bca30e5145628",
+            .hash = "microzig-0.15.2-D20YScQA4AAc7NnlUiDySS5xEOIuiUASZ7WHfV1xv6ul",
         },
         .dvui = .{
             .url = "git+https://github.com/david-vanderson/dvui#0ca4d5c7a7915ee53a7f69c7facb8b48b7807f40",

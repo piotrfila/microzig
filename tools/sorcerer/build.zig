@@ -5,6 +5,13 @@ const RegisterSchemaUsage = @import("src/RegisterSchemaUsage.zig");
 
 const MicroBuild = microzig.MicroBuild(.all);
 
+fn addPassthruArgs(step: *std.Build.Step.Run) void {
+    if (@import("builtin").zig_version.minor == 17)
+        step.addPassthruArgs()
+    else
+        step.addArgs(step.step.owner.args orelse &.{});
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -63,7 +70,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(cli_exe);
 
     const run_cli_cmd = b.addRunArtifact(cli_exe);
-    run_cli_cmd.addPassthruArgs();
+    addPassthruArgs(run_cli_cmd);
     run_cli_cmd.step.dependOn(b.getInstallStep());
 
     const run_cli_step = b.step("run-cli", "Run the CLI tool");
@@ -142,7 +149,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
-    run_cmd.addPassthruArgs();
+    addPassthruArgs(run_cmd);
 
     // I only want the path to the register schema file, not the lazy path,
     // because I want to be able to refresh it with `zig build` while sorcerer
