@@ -13,12 +13,41 @@ const schemas = @import("schemas");
 const RegisterSchemaUsage = @import("RegisterSchemaUsage");
 
 const Allocator = std.mem.Allocator;
+const Writer = std.Io.Writer;
+
+const usage =
+    \\sorcerer-cli - MicroZig Register Definition Tool
+    \\
+    \\Usage:
+    \\  sorcerer-cli <command> [options]
+    \\
+    \\Commands:
+    \\  list                    List all available targets
+    \\  generate <chip>         Generate register definitions for a chip
+    \\
+    \\Options for 'list':
+    \\  --port <name>           Filter by port name (e.g., rp2xxx, ch32v)
+    \\  --json                  Output in JSON format
+    \\
+    \\Options for 'generate':
+    \\  -o, --output <dir>      Output directory (default: ./zig-out)
+    \\
+    \\General options:
+    \\  -h, --help              Show this help
+    \\
+    \\Examples:
+    \\  sorcerer-cli list
+    \\  sorcerer-cli list --port rp2xxx
+    \\  sorcerer-cli list --json
+    \\  sorcerer-cli generate RP2040 -o ./my-regs/
+    \\
+;
 
 const StdoutWriter = struct {
     buf: [4096]u8 = undefined,
     file_writer: ?std.fs.File.Writer = null,
 
-    fn writer(self: *StdoutWriter) *std.Io.Writer {
+    fn writer(self: *StdoutWriter) *Writer {
         if (self.file_writer == null) {
             self.file_writer = std.fs.File.stdout().writer(&self.buf);
         }
@@ -30,7 +59,7 @@ const StderrWriter = struct {
     buf: [4096]u8 = undefined,
     file_writer: ?std.fs.File.Writer = null,
 
-    fn writer(self: *StderrWriter) *std.Io.Writer {
+    fn writer(self: *StderrWriter) *Writer {
         if (self.file_writer == null) {
             self.file_writer = std.fs.File.stderr().writer(&self.buf);
         }
@@ -55,67 +84,45 @@ fn run(allocator: Allocator) !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    var stdout_writer = std.fs.File.stderr()
+        .writer(try allocator.alloc(u8, 4 * 1024));
+    const stdout = &stdout_writer.interface;
+    defer allocator.free(stdout.buffer);
+
+    var stderr_writer = std.fs.File.stderr()
+        .writer(try allocator.alloc(u8, 4 * 1024));
+    const stderr = &stderr_writer.interface;
+    defer allocator.free(stderr.buffer);
+
     if (args.len < 2) {
-        try print_usage();
+        try stdout.writeAll(usage);
+        try stdout.flush();
         return error.Explained;
     }
 
     const command = args[1];
 
     if (std.mem.eql(u8, command, "list")) {
-        try run_list(allocator, args[2..]);
+        try run_list(allocator, args[2..], stdout, stderr);
     } else if (std.mem.eql(u8, command, "generate")) {
-        try run_generate(allocator, args[2..]);
+        try run_generate(allocator, args[2..], stdout, stderr);
     } else if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
-        try print_usage();
+        try stdout.writeAll(usage);
+        try stdout.flush();
     } else {
-        var stderr_writer: StderrWriter = .{};
-        const stderr = stderr_writer.writer();
         try stderr.print("Unknown command: {s}\n\n", .{command});
         try stderr.flush();
-        try print_usage();
+        try stdout.writeAll(usage);
+        try stdout.flush();
         return error.Explained;
     }
-}
-
-fn print_usage() !void {
-    var stdout_writer: StdoutWriter = .{};
-    const stdout = stdout_writer.writer();
-    try stdout.writeAll(
-        \\sorcerer-cli - MicroZig Register Definition Tool
-        \\
-        \\Usage:
-        \\  sorcerer-cli <command> [options]
-        \\
-        \\Commands:
-        \\  list                    List all available targets
-        \\  generate <chip>         Generate register definitions for a chip
-        \\
-        \\Options for 'list':
-        \\  --port <name>           Filter by port name (e.g., rp2xxx, ch32v)
-        \\  --json                  Output in JSON format
-        \\
-        \\Options for 'generate':
-        \\  -o, --output <dir>      Output directory (default: ./zig-out)
-        \\
-        \\General options:
-        \\  -h, --help              Show this help
-        \\
-        \\Examples:
-        \\  sorcerer-cli list
-        \\  sorcerer-cli list --port rp2xxx
-        \\  sorcerer-cli list --json
-        \\  sorcerer-cli generate RP2040 -o ./my-regs/
-        \\
-    );
-    try stdout.flush();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // List command
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn run_list(allocator: Allocator, args: []const []const u8) !void {
+fn run_list(allocator: Allocator, args: []const []const u8, stdout: *Writer, stderr: *Writer) !void {
     var port_filter: ?[]const u8 = null;
     var json_output = false;
 
@@ -125,8 +132,6 @@ fn run_list(allocator: Allocator, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "--port")) {
             i += 1;
             if (i >= args.len) {
-                var stderr_writer: StderrWriter = .{};
-                const stderr = stderr_writer.writer();
                 try stderr.writeAll("Error: --port requires a value\n");
                 try stderr.flush();
                 return error.Explained;
@@ -135,11 +140,10 @@ fn run_list(allocator: Allocator, args: []const []const u8) !void {
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_output = true;
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            try print_usage();
+            try stdout.writeAll(usage);
+            try stdout.flush();
             return;
         } else {
-            var stderr_writer: StderrWriter = .{};
-            const stderr = stderr_writer.writer();
             try stderr.print("Unknown option: {s}\n", .{arg});
             try stderr.flush();
             return error.Explained;
@@ -147,23 +151,20 @@ fn run_list(allocator: Allocator, args: []const []const u8) !void {
     }
 
     if (json_output) {
-        try print_list_json(allocator, port_filter);
+        try print_list_json(allocator, port_filter, stdout);
     } else {
-        try print_list_table(allocator, port_filter);
+        try print_list_table(allocator, port_filter, stdout);
     }
 }
 
-fn print_list_table(allocator: Allocator, port_filter: ?[]const u8) !void {
-    var stdout_writer: StdoutWriter = .{};
-    const stdout = stdout_writer.writer();
-
+fn print_list_table(allocator: Allocator, port_filter: ?[]const u8, w: *Writer) !void {
     // Track seen chip names to deduplicate display
     var seen_chips = std.StringHashMap(void).init(allocator);
     defer seen_chips.deinit();
 
     // Print header
-    stdout.print("{s:<24} {s}\n", .{ "CHIP", "PORT" }) catch |err| return handle_write_error(err);
-    stdout.print("{s:-<24} {s:-<24}\n", .{ "", "" }) catch |err| return handle_write_error(err);
+    w.print("{s:<24} {s}\n", .{ "CHIP", "PORT" }) catch |err| return handle_write_error(err);
+    w.print("{s:-<24} {s:-<24}\n", .{ "", "" }) catch |err| return handle_write_error(err);
 
     // Print entries (one line per unique chip)
     for (schemas.schemas) |schema| {
@@ -183,10 +184,10 @@ fn print_list_table(allocator: Allocator, port_filter: ?[]const u8) !void {
             }
             seen_chips.put(chip.name, {}) catch {};
 
-            stdout.print("{s:<24} {s}\n", .{ chip.name, port_name }) catch |err| return handle_write_error(err);
+            w.print("{s:<24} {s}\n", .{ chip.name, port_name }) catch |err| return handle_write_error(err);
         }
     }
-    stdout.flush() catch |err| return handle_write_error(err);
+    w.flush() catch |err| return handle_write_error(err);
 }
 
 /// Handle write errors - exit silently on BrokenPipe so that we can e.g. pipe to `more`.
@@ -200,7 +201,7 @@ fn handle_write_error(err: anyerror) error{Explained} {
     };
 }
 
-fn print_list_json(allocator: Allocator, port_filter: ?[]const u8) !void {
+fn print_list_json(allocator: Allocator, port_filter: ?[]const u8, w: *Writer) !void {
     var entries: std.ArrayList(JsonEntry) = .empty;
     defer entries.deinit(allocator);
 
@@ -237,11 +238,9 @@ fn print_list_json(allocator: Allocator, port_filter: ?[]const u8) !void {
     const json_str = try std.json.Stringify.valueAlloc(allocator, entries.items, .{ .whitespace = .indent_2 });
     defer allocator.free(json_str);
 
-    var stdout_writer: StdoutWriter = .{};
-    const stdout = stdout_writer.writer();
-    stdout.writeAll(json_str) catch |err| return handle_write_error(err);
-    stdout.writeByte('\n') catch |err| return handle_write_error(err);
-    stdout.flush() catch |err| return handle_write_error(err);
+    w.writeAll(json_str) catch |err| return handle_write_error(err);
+    w.writeByte('\n') catch |err| return handle_write_error(err);
+    w.flush() catch |err| return handle_write_error(err);
 }
 
 const JsonEntry = struct {
@@ -261,7 +260,7 @@ fn get_port_name(location: RegisterSchemaUsage.Location) []const u8 {
 // Generate command
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn run_generate(allocator: Allocator, args: []const []const u8) !void {
+fn run_generate(allocator: Allocator, args: []const []const u8, stdout: *Writer, stderr: *Writer) !void {
     var chip_name: ?[]const u8 = null;
     var output_path: []const u8 = "./zig-out";
 
@@ -271,21 +270,18 @@ fn run_generate(allocator: Allocator, args: []const []const u8) !void {
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             i += 1;
             if (i >= args.len) {
-                var stderr_writer: StderrWriter = .{};
-                const stderr = stderr_writer.writer();
                 try stderr.writeAll("Error: --output requires a value\n");
                 try stderr.flush();
                 return error.Explained;
             }
             output_path = args[i];
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            try print_usage();
+            try stdout.writeAll(usage);
+            try stdout.flush();
             return;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             chip_name = arg;
         } else {
-            var stderr_writer: StderrWriter = .{};
-            const stderr = stderr_writer.writer();
             try stderr.print("Unknown option: {s}\n", .{arg});
             try stderr.flush();
             return error.Explained;
@@ -293,8 +289,6 @@ fn run_generate(allocator: Allocator, args: []const []const u8) !void {
     }
 
     const chip = chip_name orelse {
-        var stderr_writer: StderrWriter = .{};
-        const stderr = stderr_writer.writer();
         try stderr.writeAll("Error: chip name is required\n");
         try stderr.writeAll("Usage: sorcerer-cli generate <chip> [-o <dir>]\n");
         try stderr.flush();
@@ -303,15 +297,20 @@ fn run_generate(allocator: Allocator, args: []const []const u8) !void {
 
     // Find matching schema
     const schema = find_schema(chip) orelse {
-        var stderr_writer: StderrWriter = .{};
-        const stderr = stderr_writer.writer();
         try stderr.print("Error: chip '{s}' not found\n", .{chip});
         try stderr.writeAll("Use 'sorcerer-cli list' to see available chips\n");
         try stderr.flush();
         return error.Explained;
     };
 
-    try generate_code(allocator, schema, chip, output_path);
+    try generate_code(
+        allocator,
+        schema,
+        chip,
+        output_path,
+        stdout,
+        stderr,
+    );
 }
 
 fn find_schema(chip_name: []const u8) ?RegisterSchemaUsage {
@@ -330,12 +329,9 @@ fn generate_code(
     schema: RegisterSchemaUsage,
     chip_name: []const u8,
     output_path: []const u8,
+    stdout: *Writer,
+    stderr: *Writer,
 ) !void {
-    var stderr_writer: StderrWriter = .{};
-    const stderr = stderr_writer.writer();
-    var stdout_writer: StdoutWriter = .{};
-    const stdout = stdout_writer.writer();
-
     // Get full path to register definition file
     const input_path = try get_full_path(allocator, schema.location);
     defer allocator.free(input_path);
