@@ -44,7 +44,7 @@ var state: State = .{};
 
 const State = struct {
     orig_content_scale: f32 = 1.0,
-    regz_windows: std.StringArrayHashMapUnmanaged(*RegzWindow) = .{},
+    regz_windows: std.StringArrayHashMapUnmanaged(*RegzWindow) = .empty,
     show_from_microzig_window: bool = false,
     show_stats_window: bool = true,
     show_search_chips_window: bool = false,

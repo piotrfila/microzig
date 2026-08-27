@@ -281,7 +281,7 @@ fn find_target_location(b: *std.Build, lazy_path: LazyPath) RegisterSchemaUsage.
 }
 
 fn convert_patch_files(b: *std.Build, patch_files: []const LazyPath) ![]const RegisterSchemaUsage.PatchFile {
-    var result: std.ArrayList(RegisterSchemaUsage.PatchFile) = .{};
+    var result: std.ArrayList(RegisterSchemaUsage.PatchFile) = .empty;
     for (patch_files) |patch_file| {
         const converted: RegisterSchemaUsage.PatchFile = switch (patch_file) {
             .src_path => |src_path| .{
@@ -404,7 +404,7 @@ fn get_register_schemas(b: *std.Build, mb: *MicroBuild) ![]const RegisterSchemaU
                 .patch_files = patch_files,
             });
         } else {
-            var chip_list: std.ArrayList(RegisterSchemaUsage.Chip) = .{};
+            var chip_list: std.ArrayList(RegisterSchemaUsage.Chip) = .empty;
             try chip_list.append(b.allocator, .{
                 .name = t.chip.name,
                 .target_name = twp.path,
@@ -425,7 +425,7 @@ fn get_register_schemas(b: *std.Build, mb: *MicroBuild) ![]const RegisterSchemaU
                 });
             }
         } else {
-            var board_list: std.ArrayList(RegisterSchemaUsage.Board) = .{};
+            var board_list: std.ArrayList(RegisterSchemaUsage.Board) = .empty;
             try board_list.append(b.allocator, .{
                 .name = board.name,
             });
@@ -438,7 +438,7 @@ fn get_register_schemas(b: *std.Build, mb: *MicroBuild) ![]const RegisterSchemaU
         try locations.put(lazy_path, location);
     }
 
-    var ret: std.ArrayList(RegisterSchemaUsage) = .{};
+    var ret: std.ArrayList(RegisterSchemaUsage) = .empty;
     for (deduped_targets.keys(), deduped_targets.values()) |lazy_path, format| {
         var chip_list = chips.get(lazy_path).?;
         var board_list = boards.get(lazy_path);
@@ -474,7 +474,7 @@ fn get_port_name(path: []const u8) []const u8 {
 
 /// Generate a Zig source file containing the register schemas as compile-time constants.
 fn generate_zig_schema_literal(allocator: std.mem.Allocator, schemas: []const RegisterSchemaUsage) ![]const u8 {
-    var buf: std.ArrayList(u8) = .{};
+    var buf: std.ArrayList(u8) = .empty;
     const writer = buf.writer(allocator);
 
     // Helper to normalize paths (convert backslashes to forward slashes for Windows compatibility)
