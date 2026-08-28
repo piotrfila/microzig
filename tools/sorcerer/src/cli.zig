@@ -10,7 +10,6 @@
 const std = @import("std");
 const regz = @import("regz");
 const schemas = @import("schemas");
-const RegisterSchemaUsage = @import("RegisterSchemaUsage");
 
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
@@ -249,7 +248,7 @@ const JsonEntry = struct {
     format: []const u8,
 };
 
-fn get_port_name(location: RegisterSchemaUsage.Location) []const u8 {
+fn get_port_name(location: schemas.Usage.Location) []const u8 {
     return switch (location) {
         .src_path => |src| src.port_name,
         .dependency => |dep| dep.port_name,
@@ -313,7 +312,7 @@ fn run_generate(allocator: Allocator, args: []const []const u8, stdout: *Writer,
     );
 }
 
-fn find_schema(chip_name: []const u8) ?RegisterSchemaUsage {
+fn find_schema(chip_name: []const u8) ?schemas.Usage {
     for (schemas.schemas) |schema| {
         for (schema.chips) |chip| {
             if (std.mem.eql(u8, chip.name, chip_name)) {
@@ -326,7 +325,7 @@ fn find_schema(chip_name: []const u8) ?RegisterSchemaUsage {
 
 fn generate_code(
     allocator: Allocator,
-    schema: RegisterSchemaUsage,
+    schema: schemas.Usage,
     chip_name: []const u8,
     output_path: []const u8,
     stdout: *Writer,
@@ -381,7 +380,7 @@ fn generate_code(
     try stdout.flush();
 }
 
-fn get_full_path(allocator: Allocator, location: RegisterSchemaUsage.Location) ![]const u8 {
+fn get_full_path(allocator: Allocator, location: schemas.Usage.Location) ![]const u8 {
     return switch (location) {
         .src_path => |src| try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src.build_root, src.sub_path }),
         .dependency => |dep| try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dep.build_root, dep.sub_path }),

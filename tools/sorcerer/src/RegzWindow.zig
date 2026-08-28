@@ -1,3 +1,13 @@
+const std = @import("std");
+const dvui = @import("dvui");
+const regz = @import("regz");
+const schemas = @import("schemas");
+
+const Allocator = std.mem.Allocator;
+const VirtualFilesystem = regz.VirtualFilesystem;
+
+const RegzWindow = @This();
+
 gpa: Allocator,
 arena: std.heap.ArenaAllocator,
 db: *regz.Database,
@@ -38,7 +48,7 @@ show_validation_error: bool = false,
 validation_error_message: ?[]const u8 = null,
 
 // Reference to all register schema usages (for cross-target validation)
-register_schema_usages: ?[]const RegisterSchemaUsage = null,
+register_schema_usages: ?[]const schemas.Usage = null,
 
 pub const View = enum {
     code_generation,
@@ -48,7 +58,7 @@ pub const View = enum {
 
 pub const ChipInfo = struct {
     name: []const u8,
-    patch_files: []const RegisterSchemaUsage.PatchFile,
+    patch_files: []const schemas.Usage.PatchFile,
 };
 
 pub const LoadedPatchFile = struct {
@@ -112,16 +122,6 @@ pub const PeripheralAnalysisResult = struct {
     peripheral_name: []const u8,
     result: regz.Analysis.AnalysisResult,
 };
-
-const RegzWindow = @This();
-const std = @import("std");
-const Allocator = std.mem.Allocator;
-
-const regz = @import("regz");
-const VirtualFilesystem = regz.VirtualFilesystem;
-const RegisterSchemaUsage = @import("RegisterSchemaUsage");
-
-const dvui = @import("dvui");
 
 // Tree-sitter Zig language parser
 extern fn tree_sitter_zig() callconv(.c) *dvui.c.TSLanguage;
@@ -233,7 +233,7 @@ pub fn create(
     path: []const u8,
     device: ?[]const u8,
     chip_info: ?ChipInfo,
-    register_schema_usages: ?[]const RegisterSchemaUsage,
+    register_schema_usages: ?[]const schemas.Usage,
 ) !*RegzWindow {
     const wnd = try gpa.create(RegzWindow);
     errdefer gpa.destroy(wnd);
@@ -958,7 +958,7 @@ fn load_patch_files(wnd: *RegzWindow) void {
     wnd.on_database_changed();
 }
 
-fn construct_patch_path(arena: Allocator, pf: RegisterSchemaUsage.PatchFile) ?[]const u8 {
+fn construct_patch_path(arena: Allocator, pf: schemas.Usage.PatchFile) ?[]const u8 {
     return switch (pf) {
         .src_path => |sp| std.fs.path.join(arena, &.{ sp.build_root, sp.sub_path }) catch null,
         .dependency => |dp| std.fs.path.join(arena, &.{ dp.build_root, dp.sub_path }) catch null,

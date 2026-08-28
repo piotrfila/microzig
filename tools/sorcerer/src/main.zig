@@ -2,7 +2,6 @@ const std = @import("std");
 const dvui = @import("dvui");
 const regz = @import("regz");
 const schemas = @import("schemas");
-const RegisterSchemaUsage = @import("RegisterSchemaUsage");
 const RegzWindow = @import("RegzWindow.zig");
 const SrceryTheme = @import("SrceryTheme.zig");
 
@@ -187,7 +186,7 @@ const Stats = struct {
     targetdb_count: usize,
 };
 
-fn compute_stats(rsus: []const RegisterSchemaUsage) Stats {
+fn compute_stats(rsus: []const schemas.Usage) Stats {
     var stats: Stats = .{
         .total_chips = 0,
         .total_boards = 0,
