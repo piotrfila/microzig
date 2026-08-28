@@ -2265,14 +2265,14 @@ test "add_enum_and_apply patch creates enum and applies to fields" {
             .@"enum" = .{
                 .name = "TestMode",
                 .bitsize = 2,
-                .fields = .{
+                .fields = &.{
                     .{ .value = 0x0, .name = "mode_a" },
                     .{ .value = 0x1, .name = "mode_b" },
                     .{ .value = 0x2, .name = "mode_c" },
                     .{ .value = 0x3, .name = "mode_d" },
                 },
             },
-            .apply_to = .{
+            .apply_to = &.{
                 "types.peripherals.TEST_PERIPHERAL.REG0.MODE",
                 "types.peripherals.TEST_PERIPHERAL.REG1.MODE",
                 "types.peripherals.TEST_PERIPHERAL.REG2.MODE",
@@ -2322,12 +2322,12 @@ test "add_enum_and_apply patch with empty apply_to list" {
             .@"enum" = .{
                 .name = "UnusedEnum",
                 .bitsize = 4,
-                .fields = .{
+                .fields = &.{
                     .{ .value = 0, .name = "value0" },
                     .{ .value = 1, .name = "value1" },
                 },
             },
-            .apply_to = .{},
+            .apply_to = &.{},
         },
     });
 
@@ -2356,11 +2356,11 @@ test "add_enum_and_apply patch with invalid field reference" {
             .@"enum" = .{
                 .name = "TestEnum",
                 .bitsize = 2,
-                .fields = .{
+                .fields = &.{
                     .{ .value = 0, .name = "value0" },
                 },
             },
-            .apply_to = .{
+            .apply_to = &.{
                 "types.peripherals.TEST_PERIPHERAL.NONEXISTENT.FIELD",
             },
         },

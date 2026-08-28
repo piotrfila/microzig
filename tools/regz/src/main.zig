@@ -151,7 +151,7 @@ fn main_impl(init: std.process.Init) anyerror!void {
         var diags: std.zon.parse.Diagnostics = .{};
         defer diags.deinit(db.gpa);
 
-        const patches = try std.zon.parse.fromSliceAlloc([]const regz.Patch, db.gpa, zon_text, diags, .{}) catch |err| {
+        const patches = std.zon.parse.fromSliceAlloc([]const regz.Patch, db.gpa, zon_text, &diags, .{}) catch |err| {
             if (err == error.ParseZon) {
                 std.log.err("Failed to parse zon patch file '{s}': {f}", .{ patch_path, diags });
             }
@@ -161,7 +161,7 @@ fn main_impl(init: std.process.Init) anyerror!void {
         defer std.zon.parse.free(db.gpa, patches);
 
         for (patches) |patch|
-            db.apply_patch(patch);
+            try db.apply_patch(patch);
     }
 
     // arch dependent stuff
