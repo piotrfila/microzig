@@ -5,35 +5,6 @@ const RegisterSchemaUsage = @import("src/RegisterSchemaUsage.zig");
 
 const MicroBuild = microzig.MicroBuild(.all);
 
-fn addPassthruArgs(step: *std.Build.Step.Run) void {
-    if (@import("builtin").zig_version.minor == 17)
-        step.addPassthruArgs()
-    else
-        step.addArgs(step.step.owner.args orelse &.{});
-}
-
-fn field_names(T: type) []const []const u8 {
-    const info = @typeInfo(T).@"struct";
-    if (@import("builtin").zig_version.minor == 17)
-        return info.field_names;
-
-    comptime var ret: []const []const u8 = &.{};
-    for (info.fields) |field|
-        ret = ret ++ &[_][]const u8{field.name};
-    return ret;
-}
-
-fn decl_names(T: type) []const []const u8 {
-    const info = @typeInfo(T).@"struct";
-    if (@import("builtin").zig_version.minor == 17)
-        return info.decl_names;
-
-    comptime var ret: []const []const u8 = &.{};
-    for (info.decls) |decl|
-        ret = ret ++ &[_][]const u8{decl.name};
-    return ret;
-}
-
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -121,7 +92,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(cli_exe);
 
     const run_cli_cmd = b.addRunArtifact(cli_exe);
-    addPassthruArgs(run_cli_cmd);
+    run_cli_cmd.addPassthruArgs();
     run_cli_cmd.step.dependOn(&cli_exe.step);
 
     b.step("run-cli", "Run the CLI tool")
@@ -177,7 +148,7 @@ pub fn build(b: *std.Build) void {
 
     const run_gui_cmd = b.addRunArtifact(gui_exe);
     run_gui_cmd.step.dependOn(&gui_exe.step);
-    addPassthruArgs(run_gui_cmd);
+    run_gui_cmd.addPassthruArgs();
 
     // I only want the path to the register schema file, not the lazy path,
     // because I want to be able to refresh it with `zig build` while sorcerer
@@ -203,7 +174,7 @@ const TargetWithPath = struct {
 fn get_targets(mb: *MicroBuild) []const TargetWithPath {
     @setEvalBranchQuota(50000);
     var ret: std.array_list.Managed(TargetWithPath) = .init(mb.builder.allocator);
-    inline for (comptime field_names(@FieldType(MicroBuild, "ports"))) |field_name| {
+    inline for (@typeInfo(@FieldType(MicroBuild, "ports")).@"struct".field_names) |field_name| {
         recursively_collect_targets(@field(mb.ports, field_name), field_name, &ret) catch @panic("OOM");
     }
 
@@ -227,7 +198,7 @@ fn recursively_collect_targets(field: anytype, path: []const u8, targets: *std.a
         return;
     }
 
-    inline for (comptime field_names(Type)) |field_name| {
+    inline for (type_info.@"struct".field_names) |field_name| {
         const new_path = std.fmt.allocPrint(targets.allocator, "{s}.{s}", .{ path, field_name }) catch @panic("OOM");
         try recursively_collect_targets(@field(field, field_name), new_path, targets);
     }
@@ -252,7 +223,7 @@ fn find_target_location(b: *std.Build, lazy_path: LazyPath) RegisterSchemaUsage.
             const build_root = get_build_root(b, dependency.builder);
             const root = @import("root");
             const packages = root.dependencies.packages;
-            const package_hash = inline for (comptime decl_names(packages)) |decl_name| {
+            const package_hash = inline for (@typeInfo(packages).@"struct".decl_names) |decl_name| {
                 const package = @field(packages, decl_name);
                 if (!@hasDecl(package, "build_root"))
                     continue;
@@ -263,7 +234,7 @@ fn find_target_location(b: *std.Build, lazy_path: LazyPath) RegisterSchemaUsage.
             } else unreachable;
 
             const Pair = struct { port: []const u8, dep: []const u8 };
-            const result: Pair = outer: inline for (comptime decl_names(packages)) |decl_name| {
+            const result: Pair = outer: inline for (@typeInfo(packages).@"struct".decl_names) |decl_name| {
                 const package = @field(packages, decl_name);
                 if (!@hasDecl(package, "deps"))
                     continue;
@@ -319,7 +290,7 @@ fn find_dep_name(b: *std.Build, dependency: *std.Build.Dependency) []const u8 {
     const build_root = get_build_root(b, dependency.builder);
     const root = @import("root");
     const packages = root.dependencies.packages;
-    const package_hash = inline for (comptime decl_names(packages)) |decl_name| {
+    const package_hash = inline for (@typeInfo(packages).@"struct".decl_names) |decl_name| {
         const package = @field(packages, decl_name);
         if (!@hasDecl(package, "build_root"))
             continue;
@@ -329,7 +300,7 @@ fn find_dep_name(b: *std.Build, dependency: *std.Build.Dependency) []const u8 {
         }
     } else unreachable;
 
-    inline for (comptime decl_names(packages)) |decl_name| {
+    inline for (@typeInfo(packages).@"struct".decl_names) |decl_name| {
         const package = @field(packages, decl_name);
         if (!@hasDecl(package, "deps"))
             continue;
