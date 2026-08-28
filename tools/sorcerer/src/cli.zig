@@ -42,36 +42,8 @@ const usage =
     \\
 ;
 
-const StdoutWriter = struct {
-    buf: [4096]u8 = undefined,
-    file_writer: ?std.fs.File.Writer = null,
-
-    fn writer(self: *StdoutWriter) *Writer {
-        if (self.file_writer == null) {
-            self.file_writer = std.fs.File.stdout().writer(&self.buf);
-        }
-        return &self.file_writer.?.interface;
-    }
-};
-
-const StderrWriter = struct {
-    buf: [4096]u8 = undefined,
-    file_writer: ?std.fs.File.Writer = null,
-
-    fn writer(self: *StderrWriter) *Writer {
-        if (self.file_writer == null) {
-            self.file_writer = std.fs.File.stderr().writer(&self.buf);
-        }
-        return &self.file_writer.?.interface;
-    }
-};
-
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    run(allocator) catch |err| {
+pub fn main(init: std.process.Init) !void {
+    run(init) catch |err| {
         switch (err) {
             error.Explained => std.process.exit(1),
             else => return err,
@@ -79,19 +51,19 @@ pub fn main() !void {
     };
 }
 
-fn run(allocator: Allocator) !void {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+fn run(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const arena = init.arena.allocator();
+    const io = init.io;
+    const args = try init.minimal.args.toSlice(arena);
 
-    var stdout_writer = std.fs.File.stderr()
-        .writer(try allocator.alloc(u8, 4 * 1024));
+    var stdout_writer = std.Io.File.stderr()
+        .writer(io, try arena.alloc(u8, 4 * 1024));
     const stdout = &stdout_writer.interface;
-    defer allocator.free(stdout.buffer);
 
-    var stderr_writer = std.fs.File.stderr()
-        .writer(try allocator.alloc(u8, 4 * 1024));
+    var stderr_writer = std.Io.File.stderr()
+        .writer(io, try arena.alloc(u8, 4 * 1024));
     const stderr = &stderr_writer.interface;
-    defer allocator.free(stderr.buffer);
 
     if (args.len < 2) {
         try stdout.writeAll(usage);
@@ -102,9 +74,9 @@ fn run(allocator: Allocator) !void {
     const command = args[1];
 
     if (std.mem.eql(u8, command, "list")) {
-        try run_list(allocator, args[2..], stdout, stderr);
+        try run_list(gpa, args[2..], stdout, stderr);
     } else if (std.mem.eql(u8, command, "generate")) {
-        try run_generate(allocator, args[2..], stdout, stderr);
+        try run_generate(gpa, io, args[2..], stdout, stderr);
     } else if (std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) {
         try stdout.writeAll(usage);
         try stdout.flush();
@@ -158,8 +130,8 @@ fn run_list(allocator: Allocator, args: []const []const u8, stdout: *Writer, std
 
 fn print_list_table(allocator: Allocator, port_filter: ?[]const u8, w: *Writer) !void {
     // Track seen chip names to deduplicate display
-    var seen_chips = std.StringHashMap(void).init(allocator);
-    defer seen_chips.deinit();
+    var seen_chips: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen_chips.deinit(allocator);
 
     // Print header
     w.print("{s:<24} {s}\n", .{ "CHIP", "PORT" }) catch |err| return handle_write_error(err);
@@ -181,7 +153,7 @@ fn print_list_table(allocator: Allocator, port_filter: ?[]const u8, w: *Writer) 
             if (seen_chips.contains(chip.name)) {
                 continue;
             }
-            seen_chips.put(chip.name, {}) catch {};
+            seen_chips.put(allocator, chip.name, {}) catch {};
 
             w.print("{s:<24} {s}\n", .{ chip.name, port_name }) catch |err| return handle_write_error(err);
         }
@@ -205,8 +177,8 @@ fn print_list_json(allocator: Allocator, port_filter: ?[]const u8, w: *Writer) !
     defer entries.deinit(allocator);
 
     // Track seen chip names to deduplicate
-    var seen_chips = std.StringHashMap(void).init(allocator);
-    defer seen_chips.deinit();
+    var seen_chips: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen_chips.deinit(allocator);
 
     for (schemas.schemas) |schema| {
         const port_name = get_port_name(schema.location);
@@ -223,7 +195,7 @@ fn print_list_json(allocator: Allocator, port_filter: ?[]const u8, w: *Writer) !
             if (seen_chips.contains(chip.name)) {
                 continue;
             }
-            seen_chips.put(chip.name, {}) catch {};
+            seen_chips.put(allocator, chip.name, {}) catch {};
 
             try entries.append(allocator, .{
                 .chip = chip.name,
@@ -259,7 +231,13 @@ fn get_port_name(location: schemas.Usage.Location) []const u8 {
 // Generate command
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn run_generate(allocator: Allocator, args: []const []const u8, stdout: *Writer, stderr: *Writer) !void {
+fn run_generate(
+    allocator: Allocator,
+    io: std.Io,
+    args: []const []const u8,
+    stdout: *Writer,
+    stderr: *Writer,
+) !void {
     var chip_name: ?[]const u8 = null;
     var output_path: []const u8 = "./zig-out";
 
@@ -304,6 +282,7 @@ fn run_generate(allocator: Allocator, args: []const []const u8, stdout: *Writer,
 
     try generate_code(
         allocator,
+        io,
         schema,
         chip,
         output_path,
@@ -325,6 +304,7 @@ fn find_schema(chip_name: []const u8) ?schemas.Usage {
 
 fn generate_code(
     allocator: Allocator,
+    io: std.Io,
     schema: schemas.Usage,
     chip_name: []const u8,
     output_path: []const u8,
@@ -349,7 +329,7 @@ fn generate_code(
     };
 
     // Create database from register definition file
-    var db = regz.Database.create_from_path(allocator, format, input_path, chip_name) catch |err| {
+    var db = regz.Database.create_from_path(allocator, io, format, input_path, chip_name) catch |err| {
         try stderr.print("Error loading register definition: {}\n", .{err});
         try stderr.flush();
         return error.Explained;
@@ -357,26 +337,26 @@ fn generate_code(
     defer db.destroy();
 
     // Generate to virtual filesystem first
-    var vfs = regz.VirtualFilesystem.init(allocator);
+    var vfs = try regz.VirtualIo.init(allocator);
     defer vfs.deinit();
 
-    db.to_zig(vfs.dir(), .{}) catch |err| {
+    db.to_zig(vfs.io(), regz.VirtualIo.root_dir, .{}) catch |err| {
         try stderr.print("Error generating Zig code: {}\n", .{err});
         try stderr.flush();
         return error.Explained;
     };
 
     // Write virtual filesystem contents to actual directory
-    var output_dir = std.fs.cwd().makeOpenPath(output_path, .{}) catch |err| {
+    var output_dir = std.Io.Dir.cwd().createDirPathOpen(io, output_path, .{}) catch |err| {
         try stderr.print("Error creating output directory: {}\n", .{err});
         try stderr.flush();
         return error.Explained;
     };
-    defer output_dir.close();
+    defer output_dir.close(io);
 
-    const files_written = try write_vfs_to_dir(allocator, &vfs, output_dir, .root, "");
+    const files_written = try vfs.save_dir_recursive(.root, io, output_dir);
 
-    try stdout.print("Generated {d} file(s)\n", .{files_written});
+    try stdout.print("Generated {} file(s)\n", .{files_written});
     try stdout.flush();
 }
 
@@ -385,48 +365,4 @@ fn get_full_path(allocator: Allocator, location: schemas.Usage.Location) ![]cons
         .src_path => |src| try std.fmt.allocPrint(allocator, "{s}/{s}", .{ src.build_root, src.sub_path }),
         .dependency => |dep| try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dep.build_root, dep.sub_path }),
     };
-}
-
-fn write_vfs_to_dir(
-    allocator: Allocator,
-    vfs: *regz.VirtualFilesystem,
-    output_dir: std.fs.Dir,
-    parent_id: regz.VirtualFilesystem.ID,
-    parent_path: []const u8,
-) !usize {
-    var files_written: usize = 0;
-
-    const children = try vfs.get_children(allocator, parent_id);
-    defer allocator.free(children);
-
-    for (children) |child| {
-        const name = vfs.get_name(child.id);
-        const full_path = if (parent_path.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}/{s}", .{ parent_path, name })
-        else
-            try allocator.dupe(u8, name);
-        defer allocator.free(full_path);
-
-        switch (child.kind) {
-            .file => {
-                const content = vfs.get_content(child.id);
-
-                // Create subdirectory if needed
-                if (std.fs.path.dirname(full_path)) |dirname| {
-                    try output_dir.makePath(dirname);
-                }
-
-                const file = try output_dir.createFile(full_path, .{});
-                defer file.close();
-                try file.writeAll(content);
-
-                files_written += 1;
-            },
-            .directory => {
-                files_written += try write_vfs_to_dir(allocator, vfs, output_dir, child.id, full_path);
-            },
-        }
-    }
-
-    return files_written;
 }

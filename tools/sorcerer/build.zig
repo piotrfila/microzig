@@ -382,7 +382,7 @@ const LazyPathContext = struct {
             .src_path => |val| val.owner == b.src_path.owner and std.mem.eql(u8, val.sub_path, b.src_path.sub_path),
             .generated => @panic("Generated paths unsupported"),
             .cwd_relative => @panic("Cwd relative paths unsupported, you probably shouldn't be vendoring that in MicroZig anyways"),
-            // .relative => @panic("Relative paths unsupported, you probably shouldn't be vendoring that in MicroZig anyways"),
+            .relative => @panic("Relative paths unsupported, you probably shouldn't be vendoring that in MicroZig anyways"),
             .dependency => |val| val.dependency == b.dependency.dependency and std.mem.eql(u8, val.sub_path, b.dependency.sub_path),
         };
     }
