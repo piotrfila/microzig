@@ -139,11 +139,6 @@ pub fn build(b: *std.Build) void {
     if (no_gui) return;
 
     // GUI-only dependencies
-    const tree_sitter_zig_dep = b.lazyDependency("tree_sitter_zig", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     const tree_sitter_diff_dep = b.lazyDependency("tree_sitter_diff", .{
         .target = target,
         .optimize = optimize,
@@ -152,6 +147,7 @@ pub fn build(b: *std.Build) void {
     const dvui_mod = (b.lazyDependency("dvui", .{
         .target = target,
         .optimize = optimize,
+        .backend = .sdl3,
     }) orelse return).module("dvui_sdl3");
 
     const gui_exe = b.addExecutable(.{
@@ -169,17 +165,6 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(gui_exe);
-
-    if (tree_sitter_zig_dep) |tsd| {
-        gui_exe.root_module.addIncludePath(tsd.path("src"));
-        gui_exe.root_module.addCSourceFiles(.{
-            .root = tsd.path(""),
-            .files = &.{"src/parser.c"},
-            .flags = &.{"-std=c11"},
-        });
-    }
-    // if (tree_sitter_zig_dep) |tsz|
-    //     exe_mod.linkLibrary(tsz.artifact("tree-sitter-zig"));
 
     if (tree_sitter_diff_dep) |tsd| {
         gui_exe.root_module.addIncludePath(tsd.path("src"));
