@@ -12,6 +12,7 @@ const regz = @import("regz");
 const schemas = @import("schemas");
 
 const Allocator = std.mem.Allocator;
+const VirtualIo = regz.virtual_io.VirtualIo;
 const Writer = std.Io.Writer;
 
 const usage =
@@ -337,10 +338,10 @@ fn generate_code(
     defer db.destroy();
 
     // Generate to virtual filesystem first
-    var vfs = try regz.VirtualIo.init(allocator);
+    var vfs = try VirtualIo.init(allocator);
     defer vfs.deinit();
 
-    db.to_zig(vfs.io(), regz.VirtualIo.root_dir, .{}) catch |err| {
+    db.to_zig(vfs.io(), VirtualIo.root_dir, .{}) catch |err| {
         try stderr.print("Error generating Zig code: {}\n", .{err});
         try stderr.flush();
         return error.Explained;

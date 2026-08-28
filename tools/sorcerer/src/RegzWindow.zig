@@ -4,7 +4,7 @@ const regz = @import("regz");
 const schemas = @import("schemas");
 
 const Allocator = std.mem.Allocator;
-const VirtualFilesystem = regz.VirtualFilesystem;
+const VirtualIo = regz.virtual_io.VirtualIo;
 
 const RegzWindow = @This();
 
@@ -15,9 +15,9 @@ id_extra: usize,
 title: []const u8,
 show_window: bool = true,
 path: []const u8,
-vfs: VirtualFilesystem,
-selected_file: ?VirtualFilesystem.ID = null,
-displayed_file: ?VirtualFilesystem.ID = null,
+vfs: VirtualIo,
+selected_file: ?std.Io.File = null,
+displayed_file: ?std.Io.File = null,
 active_view: View = .code_generation,
 chip_info: ?ChipInfo = null,
 loaded_patches: std.StringArrayHashMapUnmanaged(LoadedPatchFile) = .empty,
@@ -238,7 +238,9 @@ pub fn create(
     const wnd = try gpa.create(RegzWindow);
     errdefer gpa.destroy(wnd);
 
-    var db = try regz.Database.create_from_path(gpa, format, path, device);
+    var vfs: VirtualIo = try .init(gpa);
+
+    var db = try regz.Database.create_from_path(gpa, vfs.io(), format, path, device);
     errdefer db.destroy();
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -261,14 +263,14 @@ pub fn create(
         .title = title,
         .arena = arena,
         .path = path,
-        .vfs = .init(gpa),
+        .vfs = vfs,
         .chip_info = chip_info,
         .format = format,
         .device = device,
         .register_schema_usages = register_schema_usages,
     };
 
-    try db.to_zig(wnd.vfs.dir(), .{});
+    try db.to_zig(wnd.vfs.io(), VirtualIo.root_dir, .{});
 
     count += 1;
 
@@ -340,9 +342,10 @@ pub fn show(wnd: *RegzWindow) !void {
                 if (dvui.dialogNativeFolderSelect(dvui.currentWindow().arena(), .{
                     .title = "Save Generated Code To...",
                 }) catch null) |folder_path| {
-                    wnd.save_to_directory(folder_path) catch |err| {
-                        std.log.err("Failed to save: {}", .{err});
-                    };
+                    var output_dir = try std.Io.Dir.cwd()
+                        .createDirPathOpen(dvui.io, folder_path, .{});
+                    defer output_dir.close(dvui.io);
+                    _ = try wnd.vfs.save_dir_recursive(.root, dvui.io, output_dir);
                 }
             }
 
@@ -390,7 +393,7 @@ pub fn show(wnd: *RegzWindow) !void {
     }
 
     switch (wnd.active_view) {
-        .code_generation => wnd.show_code_generation(arena.allocator()),
+        .code_generation => wnd.show_code_generation(),
         .patches => wnd.show_patches(arena.allocator()),
         .analysis => wnd.show_analysis(arena.allocator()),
     }
@@ -401,16 +404,20 @@ pub fn show(wnd: *RegzWindow) !void {
     wnd.show_validation_error_dialog();
 }
 
-fn show_code_generation(wnd: *RegzWindow, arena: Allocator) void {
+fn show_code_generation(wnd: *RegzWindow) void {
+    if (wnd.selected_file == null) {
+        std.log.warn("No file selected", .{});
+        return;
+    }
+
     var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .both });
     defer hbox.deinit();
 
     {
-        const scroll_arena = dvui.scrollArea(@src(), .{}, .{});
+        const scroll_arena = dvui.scrollArea(@src(), .{}, .{ .expand = .both });
         defer scroll_arena.deinit();
 
         wnd.show_file_tree(
-            arena,
             @src(),
             .{},
             .{
@@ -423,7 +430,7 @@ fn show_code_generation(wnd: *RegzWindow, arena: Allocator) void {
             },
             .{
                 .border = .{ .x = 1 },
-                .corner_radius = dvui.Rect.all(4),
+                .corners = .all(4),
                 .box_shadow = .{
                     .color = .black,
                     .offset = .{ .x = -5, .y = 5 },
@@ -435,30 +442,38 @@ fn show_code_generation(wnd: *RegzWindow, arena: Allocator) void {
         ) catch {};
     }
 
-    if (dvui.useTreeSitter) {
-        var te: dvui.TextEntryWidget = undefined;
-        te.init(@src(), .{
-            .multiline = true,
-            .cache_layout = true,
-            .text = .{ .internal = .{ .limit = 10_000_000 } },
-            .tree_sitter = .{
-                .language = tree_sitter_zig(),
-                .queries = zig_queries,
-                .highlights = zig_highlights,
-                .log_captures = false,
-            },
-        }, .{ .expand = .both });
-        defer te.deinit();
+    var source_panel = dvui.box(@src(), .{ .dir = .vertical }, .{ .expand = .both });
+    defer source_panel.deinit();
 
-        if (wnd.selected_file) |id| {
-            // Update text when file selection changes
-            if (wnd.displayed_file != id or dvui.firstFrame(te.data().id)) {
-                te.textSet(wnd.vfs.get_content(id), false);
+    var text_init_options: dvui.TextEntryWidget.InitOptions = .{
+        .multiline = true,
+        .cache_layout = true,
+        .text = .{ .internal = .{ .limit = 10_000_000 } },
+    };
+    if (dvui.useTreeSitter) {
+        text_init_options.tree_sitter = .{
+            .language = tree_sitter_zig(),
+            .queries = zig_queries,
+            .highlights = zig_highlights,
+            .log_captures = false,
+        };
+    }
+
+    var te: dvui.TextEntryWidget = undefined;
+    te.init(@src(), text_init_options, .{ .expand = .both });
+
+    if (wnd.selected_file) |file| {
+        // Update text when file selection changes.
+        if (!std.meta.eql(wnd.displayed_file, file) or dvui.firstFrame(te.data().id)) {
+            if (wnd.vfs.file_contents(file)) |content| {
+                te.textSet(content.items, false);
                 te.textLayout.selection.moveCursor(0, false);
-                wnd.displayed_file = id;
+                wnd.displayed_file = file;
+            } else |_| {
+                wnd.selected_file = null;
+                wnd.displayed_file = null;
             }
         }
-
         // Process only read-only events (selection, copy, navigation, scroll)
         process_read_only_events(&te);
         te.draw();
@@ -470,8 +485,10 @@ fn show_code_generation(wnd: *RegzWindow, arena: Allocator) void {
         var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal });
         defer tl.deinit();
 
-        if (wnd.selected_file) |id|
-            tl.addText(wnd.vfs.get_content(id), .{});
+        if (wnd.selected_file) |file| {
+            if (wnd.vfs.file_contents(file) catch null) |contents|
+                tl.addText(contents.items, .{});
+        }
     }
 }
 
@@ -754,13 +771,14 @@ fn show_analysis_details(wnd: *RegzWindow, arena: Allocator) void {
         });
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = 4 } });
 
-        const header_style: dvui.GridWidget.CellStyle = .{
-            .cell_opts = .{
-                .border = .{ .y = 0, .h = 1, .x = 0, .w = 0 },
-            },
-        };
+        // const header_style: dvui.GridWidget.CellStyle = .{
+        //     .cell_opts = .{
+        //         .border = .{ .y = 0, .h = 1, .x = 0, .w = 0 },
+        //     },
+        // };
 
-        var grid = dvui.grid(@src(), .{ .col_widths = &wnd.analysis_col_widths }, .{}, .{
+        // var grid = dvui.grid(@src(), .{ .col_widths = &wnd.analysis_col_widths }, .{}, .{
+        var grid = dvui.grid(@src(), .{}, .{
             .expand = .both,
             .background = true,
             .padding = dvui.Rect.all(4),
@@ -768,51 +786,51 @@ fn show_analysis_details(wnd: *RegzWindow, arena: Allocator) void {
         defer grid.deinit();
 
         // Headers with resize handles
-        dvui.gridHeading(@src(), grid, 0, "Name", .{
-            .sizes = &wnd.analysis_col_widths,
-            .num = 0,
-            .min_size = 60,
-            .max_size = 300,
-        }, header_style);
-        dvui.gridHeading(@src(), grid, 1, "Value", .{
-            .sizes = &wnd.analysis_col_widths,
-            .num = 1,
-            .min_size = 40,
-            .max_size = 150,
-        }, header_style);
-        dvui.gridHeading(@src(), grid, 2, "Description", .{
-            .sizes = &wnd.analysis_col_widths,
-            .num = 2,
-            .min_size = 100,
-            .max_size = 500,
-        }, header_style);
+        // dvui.gridHeading(@src(), grid, 0, "Name", .{
+        //     .sizes = &wnd.analysis_col_widths,
+        //     .num = 0,
+        //     .min_size = 60,
+        //     .max_size = 300,
+        // }, header_style);
+        // dvui.gridHeading(@src(), grid, 1, "Value", .{
+        //     .sizes = &wnd.analysis_col_widths,
+        //     .num = 1,
+        //     .min_size = 40,
+        //     .max_size = 150,
+        // }, header_style);
+        // dvui.gridHeading(@src(), grid, 2, "Description", .{
+        //     .sizes = &wnd.analysis_col_widths,
+        //     .num = 2,
+        //     .min_size = 100,
+        //     .max_size = 500,
+        // }, header_style);
 
         // Rows
         for (group.fields, 0..) |field, row_num| {
-            var cell_num: dvui.GridWidget.Cell = .colRow(0, row_num);
+            var cell_num: dvui.GridWidget.Cell = .{ .col = 0, .row = row_num };
 
             // Name
             {
-                defer cell_num.col_num += 1;
-                var cell = grid.bodyCell(@src(), cell_num, .{});
-                defer cell.deinit();
+                defer cell_num.col += 1;
+                // var cell = grid.bodyCell(@src(), cell_num, .{});
+                // defer cell.deinit();
                 dvui.labelNoFmt(@src(), field.name, .{}, .{});
             }
 
             // Value
             {
-                defer cell_num.col_num += 1;
-                var cell = grid.bodyCell(@src(), cell_num, .{});
-                defer cell.deinit();
+                defer cell_num.col += 1;
+                // var cell = grid.bodyCell(@src(), cell_num, .{});
+                // defer cell.deinit();
                 const value_str = std.fmt.allocPrint(arena, "{d}", .{field.value}) catch "?";
                 dvui.labelNoFmt(@src(), value_str, .{}, .{});
             }
 
             // Description
             {
-                defer cell_num.col_num += 1;
-                var cell = grid.bodyCell(@src(), cell_num, .{});
-                defer cell.deinit();
+                defer cell_num.col += 1;
+                // var cell = grid.bodyCell(@src(), cell_num, .{});
+                // defer cell.deinit();
                 dvui.labelNoFmt(@src(), field.description orelse "", .{}, .{});
             }
         }
@@ -856,7 +874,7 @@ fn get_or_run_full_analysis(wnd: *RegzWindow) ?*const CachedAnalysis {
     };
 
     var results: std.ArrayList(PeripheralAnalysisResult) = .empty;
-    var analysis = regz.Analysis.init(wnd.db);
+    var analysis: regz.Analysis = .init(wnd.db);
 
     for (peripherals) |peripheral| {
         const result = analysis.find_equivalent_enums(alloc, peripheral.id) catch {
@@ -896,7 +914,7 @@ fn load_patch_files(wnd: *RegzWindow) void {
         };
 
         // Read and parse ZON file
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        var reader = (std.Io.Dir.cwd().openFile(dvui.io, path, .{}) catch |err| {
             const owned_path = alloc.dupe(u8, path) catch continue;
             const error_msg = std.fmt.allocPrint(alloc, "Failed to open file: {s}", .{@errorName(err)}) catch continue;
             wnd.loaded_patches.put(wnd.gpa, owned_path, .{
@@ -908,10 +926,11 @@ fn load_patch_files(wnd: *RegzWindow) void {
                 .is_editable = is_editable,
             }) catch {};
             continue;
-        };
-        defer file.close();
+        }).reader(dvui.io, "");
+        defer reader.file.close(dvui.io);
 
-        const content = file.readToEndAllocOptions(alloc, 10 * 1024 * 1024, null, .of(u8), 0) catch |err| {
+        var writer: std.Io.Writer.Allocating = .init(alloc);
+        _ = writer.writer.sendFile(&reader, .limited(10 * 1024 * 1024)) catch |err| {
             const owned_path = alloc.dupe(u8, path) catch continue;
             const error_msg = std.fmt.allocPrint(alloc, "Failed to read file: {s}", .{@errorName(err)}) catch continue;
             wnd.loaded_patches.put(wnd.gpa, owned_path, .{
@@ -925,7 +944,7 @@ fn load_patch_files(wnd: *RegzWindow) void {
             continue;
         };
 
-        const patches = std.zon.parse.fromSlice([]const regz.Patch, alloc, content, null, .{}) catch |err| {
+        const patches = std.zon.parse.fromSliceAlloc([]const regz.Patch, alloc, writer.toOwnedSliceSentinel(0) catch unreachable, null, .{}) catch |err| {
             const owned_path = alloc.dupe(u8, path) catch continue;
             const error_msg = std.fmt.allocPrint(alloc, "Failed to parse ZON: {s}", .{@errorName(err)}) catch continue;
             wnd.loaded_patches.put(wnd.gpa, owned_path, .{
@@ -941,7 +960,7 @@ fn load_patch_files(wnd: *RegzWindow) void {
 
         // Apply patches to the database so analysis reflects them
         for (patches) |patch| {
-            apply_single_patch(wnd.db, alloc, patch) catch continue;
+            wnd.db.apply_patch(patch) catch continue;
         }
 
         const owned_path = alloc.dupe(u8, path) catch continue;
@@ -959,10 +978,10 @@ fn load_patch_files(wnd: *RegzWindow) void {
 }
 
 fn construct_patch_path(arena: Allocator, pf: schemas.Usage.PatchFile) ?[]const u8 {
-    return switch (pf) {
-        .src_path => |sp| std.fs.path.join(arena, &.{ sp.build_root, sp.sub_path }) catch null,
-        .dependency => |dp| std.fs.path.join(arena, &.{ dp.build_root, dp.sub_path }) catch null,
-    };
+    return std.Io.Dir.path.join(arena, switch (pf) {
+        .src_path => |sp| &.{ sp.build_root, sp.sub_path },
+        .dependency => |dp| &.{ dp.build_root, dp.sub_path },
+    }) catch null;
 }
 
 fn show_patch_tree(wnd: *RegzWindow, arena: Allocator) void {
@@ -988,7 +1007,7 @@ fn show_patch_tree(wnd: *RegzWindow, arena: Allocator) void {
         const icon = if (loaded.parse_error != null) dvui.entypo.warning else dvui.entypo.documents;
         dvui.icon(@src(), "FileIcon", icon, .{}, .{ .gravity_y = 0.5 });
 
-        const basename = std.fs.path.basename(path);
+        const basename = std.Io.Dir.path.basename(path);
         const editable_suffix: []const u8 = if (loaded.is_editable) "" else " (read-only)";
         _ = dvui.label(@src(), "{s}{s}", .{ basename, editable_suffix }, .{});
 
@@ -1204,12 +1223,12 @@ fn show_patch_details(wnd: *RegzWindow, arena: Allocator) void {
             }
         },
         .diff => {
-            wnd.show_patch_diff(arena, sel, patch);
+            wnd.show_patch_diff(sel, patch);
         },
     }
 }
 
-fn show_patch_diff(wnd: *RegzWindow, arena: Allocator, sel: SelectedPatch, patch: regz.Patch) void {
+fn show_patch_diff(wnd: *RegzWindow, sel: SelectedPatch, patch: regz.Patch) void {
     // Check if cache is valid
     if (wnd.cached_diff) |cached| {
         if (cached.file_index == sel.file_index and cached.patch_index == sel.patch_index) {
@@ -1227,7 +1246,7 @@ fn show_patch_diff(wnd: *RegzWindow, arena: Allocator, sel: SelectedPatch, patch
     }
 
     // Compute new diff
-    wnd.compute_patch_diff(arena, sel, patch);
+    wnd.compute_patch_diff(sel, patch);
 
     // Display the newly computed diff
     if (wnd.cached_diff) |cached| {
@@ -1344,7 +1363,7 @@ fn display_diff(wnd: *RegzWindow, file_diffs: []const FileDiff, sel: SelectedPat
     }
 }
 
-fn compute_patch_diff(wnd: *RegzWindow, temp_arena: Allocator, sel: SelectedPatch, patch: regz.Patch) void {
+fn compute_patch_diff(wnd: *RegzWindow, sel: SelectedPatch, patch: regz.Patch) void {
     _ = patch; // We'll get the patch from the loaded patches instead
     // Use window's persistent arena for cached data
     const arena = wnd.arena.allocator();
@@ -1354,7 +1373,7 @@ fn compute_patch_diff(wnd: *RegzWindow, temp_arena: Allocator, sel: SelectedPatc
     // 2. after_db - with all patches UP TO AND INCLUDING the selected one applied
 
     // Create before database
-    var before_db = regz.Database.create_from_path(wnd.gpa, wnd.format, wnd.path, wnd.device) catch |err| {
+    var before_db = regz.Database.create_from_path(wnd.gpa, wnd.vfs.io(), wnd.format, wnd.path, wnd.device) catch |err| {
         wnd.cached_diff = .{
             .file_index = sel.file_index,
             .patch_index = sel.patch_index,
@@ -1366,7 +1385,7 @@ fn compute_patch_diff(wnd: *RegzWindow, temp_arena: Allocator, sel: SelectedPatc
     defer before_db.destroy();
 
     // Create after database
-    var after_db = regz.Database.create_from_path(wnd.gpa, wnd.format, wnd.path, wnd.device) catch |err| {
+    var after_db = regz.Database.create_from_path(wnd.gpa, wnd.vfs.io(), wnd.format, wnd.path, wnd.device) catch |err| {
         wnd.cached_diff = .{
             .file_index = sel.file_index,
             .patch_index = sel.patch_index,
@@ -1396,23 +1415,17 @@ fn compute_patch_diff(wnd: *RegzWindow, temp_arena: Allocator, sel: SelectedPatc
                 const is_selected_or_before = (file_idx < sel.file_index) or
                     (file_idx == sel.file_index and patch_idx <= sel.patch_index);
 
-                // Serialize this patch
-                var zon_buf: std.Io.Writer.Allocating = .init(temp_arena);
-                const patch_array: []const regz.Patch = &.{p};
-                std.zon.stringify.serialize(patch_array, .{}, &zon_buf.writer) catch continue;
-                const zon_text = temp_arena.dupeZ(u8, zon_buf.written()) catch continue;
-
                 var diags: std.zon.parse.Diagnostics = .{};
 
                 // Apply to before_db if this patch comes before the selected one
                 if (is_before_selected) {
-                    before_db.apply_patch(zon_text, &diags) catch continue;
+                    before_db.apply_patch(p) catch continue;
                 }
 
                 // Apply to after_db if this patch is the selected one or comes before it
                 if (is_selected_or_before) {
                     diags = .{};
-                    after_db.apply_patch(zon_text, &diags) catch continue;
+                    after_db.apply_patch(p) catch continue;
                 }
             }
         }
@@ -1426,32 +1439,23 @@ fn compute_patch_diff(wnd: *RegzWindow, temp_arena: Allocator, sel: SelectedPatc
             const is_selected_or_before = (file_idx < sel.file_index) or
                 (file_idx == sel.file_index and full_idx <= sel.patch_index);
 
-            // Serialize this patch
-            var zon_buf: std.Io.Writer.Allocating = .init(temp_arena);
-            const patch_array: []const regz.Patch = &.{p};
-            std.zon.stringify.serialize(patch_array, .{}, &zon_buf.writer) catch continue;
-            const zon_text = temp_arena.dupeZ(u8, zon_buf.written()) catch continue;
-
-            var diags: std.zon.parse.Diagnostics = .{};
-
             // Apply to before_db if this patch comes before the selected one
             if (is_before_selected) {
-                before_db.apply_patch(zon_text, &diags) catch continue;
+                before_db.apply_patch(p) catch continue;
             }
 
             // Apply to after_db if this patch is the selected one or comes before it
             if (is_selected_or_before) {
-                diags = .{};
-                after_db.apply_patch(zon_text, &diags) catch continue;
+                after_db.apply_patch(p) catch continue;
             }
         }
     }
 
     // Generate code for before state
-    var before_vfs: VirtualFilesystem = .init(wnd.gpa);
+    var before_vfs = VirtualIo.init(wnd.gpa) catch @panic("bruh");
     defer before_vfs.deinit();
 
-    before_db.to_zig(before_vfs.dir(), .{}) catch |err| {
+    before_db.to_zig(before_vfs.io(), VirtualIo.root_dir, .{}) catch |err| {
         wnd.cached_diff = .{
             .file_index = sel.file_index,
             .patch_index = sel.patch_index,
@@ -1462,10 +1466,10 @@ fn compute_patch_diff(wnd: *RegzWindow, temp_arena: Allocator, sel: SelectedPatc
     };
 
     // Generate code for after state
-    var after_vfs: VirtualFilesystem = .init(wnd.gpa);
+    var after_vfs = VirtualIo.init(wnd.gpa) catch @panic("bruh");
     defer after_vfs.deinit();
 
-    after_db.to_zig(after_vfs.dir(), .{}) catch |err| {
+    after_db.to_zig(after_vfs.io(), VirtualIo.root_dir, .{}) catch |err| {
         wnd.cached_diff = .{
             .file_index = sel.file_index,
             .patch_index = sel.patch_index,
@@ -1479,15 +1483,15 @@ fn compute_patch_diff(wnd: *RegzWindow, temp_arena: Allocator, sel: SelectedPatc
     var file_diffs: std.ArrayList(FileDiff) = .empty;
 
     // Recursively compare all files
-    compare_vfs_files(arena, &before_vfs, &after_vfs, &file_diffs, .root, "") catch {
-        wnd.cached_diff = .{
-            .file_index = sel.file_index,
-            .patch_index = sel.patch_index,
-            .file_diffs = &.{},
-            .error_message = "Failed to compare files",
-        };
-        return;
-    };
+    // compare_vfs_files(arena, &before_vfs, &after_vfs, &file_diffs, .root, "") catch {
+    //     wnd.cached_diff = .{
+    //         .file_index = sel.file_index,
+    //         .patch_index = sel.patch_index,
+    //         .file_diffs = &.{},
+    //         .error_message = "Failed to compare files",
+    //     };
+    //     return;
+    // };
 
     wnd.cached_diff = .{
         .file_index = sel.file_index,
@@ -1498,10 +1502,10 @@ fn compute_patch_diff(wnd: *RegzWindow, temp_arena: Allocator, sel: SelectedPatc
 
 fn compare_vfs_files(
     arena: Allocator,
-    original_vfs: *VirtualFilesystem,
-    patched_vfs: *VirtualFilesystem,
+    original_vfs: *VirtualIo,
+    patched_vfs: *VirtualIo,
     file_diffs: *std.ArrayList(FileDiff),
-    dir_id: VirtualFilesystem.ID,
+    dir_id: VirtualIo.ID,
     path_prefix: []const u8,
 ) !void {
     const children = try original_vfs.get_children(arena, dir_id);
@@ -1724,15 +1728,16 @@ fn show_enum_details(e: anytype, arena: Allocator) void {
         _ = dvui.spacer(@src(), .{ .min_size_content = .{ .h = 4 } });
 
         // Table for enum fields
-        const header_style: dvui.GridWidget.CellStyle = .{
-            .cell_opts = .{
-                .border = .{ .y = 0, .h = 1, .x = 0, .w = 0 },
-            },
-        };
+        // const header_style: dvui.GridWidget.CellStyle = .{
+        //     .cell_opts = .{
+        //         .border = .{ .y = 0, .h = 1, .x = 0, .w = 0 },
+        //     },
+        // };
 
         // Column widths: Name (120 fixed), Value (60 fixed), Description (proportional -1)
-        var col_widths: [3]f32 = .{ 0, 0, 0 };
-        var grid = dvui.grid(@src(), .{ .col_widths = &col_widths }, .{}, .{
+        // var col_widths: [3]f32 = .{ 0, 0, 0 };
+        // var grid = dvui.grid(@src(), .{ .col_widths = &col_widths }, .{}, .{
+        var grid = dvui.grid(@src(), .{}, .{
             .expand = .both,
             .background = true,
             .padding = dvui.Rect.all(4),
@@ -1740,39 +1745,39 @@ fn show_enum_details(e: anytype, arena: Allocator) void {
         defer grid.deinit();
 
         // Layout: fixed 120 for Name, fixed 60 for Value, rest for Description
-        dvui.columnLayoutProportional(&.{ 120, 60, -1 }, &col_widths, grid.data().contentRect().w);
+        // dvui.columnLayoutProportional(&.{ 120, 60, -1 }, &col_widths, grid.data().contentRect().w);
 
         // Table headers
-        dvui.gridHeading(@src(), grid, 0, "Name", .fixed, header_style);
-        dvui.gridHeading(@src(), grid, 1, "Value", .fixed, header_style);
-        dvui.gridHeading(@src(), grid, 2, "Description", .fixed, header_style);
+        // dvui.gridHeading(@src(), grid, 0, "Name", .fixed, header_style);
+        // dvui.gridHeading(@src(), grid, 1, "Value", .fixed, header_style);
+        // dvui.gridHeading(@src(), grid, 2, "Description", .fixed, header_style);
 
         // Table rows
         for (e.fields, 0..) |field, row_num| {
-            var cell_num: dvui.GridWidget.Cell = .colRow(0, row_num);
+            var cell_num: dvui.GridWidget.Cell = .{ .col = 0, .row = row_num };
 
             // Name column
             {
-                defer cell_num.col_num += 1;
-                var cell = grid.bodyCell(@src(), cell_num, .{});
-                defer cell.deinit();
+                defer cell_num.col += 1;
+                // var cell = grid.bodyCell(@src(), cell_num, .{});
+                // defer cell.deinit();
                 dvui.labelNoFmt(@src(), field.name, .{}, .{});
             }
 
             // Value column
             {
-                defer cell_num.col_num += 1;
-                var cell = grid.bodyCell(@src(), cell_num, .{});
-                defer cell.deinit();
+                defer cell_num.col += 1;
+                // var cell = grid.bodyCell(@src(), cell_num, .{});
+                // defer cell.deinit();
                 const value_str = std.fmt.allocPrint(arena, "{d}", .{field.value}) catch "?";
                 dvui.labelNoFmt(@src(), value_str, .{}, .{});
             }
 
             // Description column
             {
-                defer cell_num.col_num += 1;
-                var cell = grid.bodyCell(@src(), cell_num, .{});
-                defer cell.deinit();
+                defer cell_num.col += 1;
+                // var cell = grid.bodyCell(@src(), cell_num, .{});
+                // defer cell.deinit();
                 dvui.labelNoFmt(@src(), field.description orelse "", .{}, .{});
             }
         }
@@ -1827,119 +1832,73 @@ fn labeled_field(label_text: []const u8, value: []const u8) void {
     _ = dvui.label(@src(), " {s}", .{value}, .{});
 }
 
-fn save_to_directory(wnd: *RegzWindow, folder_path: []const u8) !void {
-    var output_dir = try std.fs.cwd().makeOpenPath(folder_path, .{});
-    defer output_dir.close();
-
-    try wnd.save_vfs_recursive(output_dir, .root);
-}
-
-fn save_vfs_recursive(wnd: *RegzWindow, output_dir: std.fs.Dir, parent_id: VirtualFilesystem.ID) !void {
-    const children = try wnd.vfs.get_children(wnd.gpa, parent_id);
-    defer wnd.gpa.free(children);
-
-    for (children) |entry| {
-        const name = wnd.vfs.get_name(entry.id);
-        switch (entry.kind) {
-            .directory => {
-                var subdir = try output_dir.makeOpenPath(name, .{});
-                defer subdir.close();
-                try wnd.save_vfs_recursive(subdir, entry.id);
-            },
-            .file => {
-                const content = wnd.vfs.get_content(entry.id);
-                const file = try output_dir.createFile(name, .{});
-                defer file.close();
-                try file.writeAll(content);
-            },
-        }
-    }
-}
-
 fn show_file_tree(
-    wnd: *RegzWindow,
-    arena: Allocator,
+    w: *RegzWindow,
     src: std.builtin.SourceLocation,
     tree_init_options: dvui.TreeWidget.InitOptions,
     tree_options: dvui.Options,
     branch_options: dvui.Options,
     expander_options: dvui.Options,
 ) !void {
-    const unique_id = dvui.parentGet().extendId(@src(), 0);
-
     var tree = dvui.TreeWidget.tree(src, tree_init_options, tree_options);
     defer tree.deinit();
 
-    const children = try wnd.vfs.get_children(arena, .root);
-    try wnd.show_file_tree_recursive(arena, .root, children, tree, unique_id, branch_options, expander_options);
+    try w.show_file_tree_recursive(.root, tree, branch_options, expander_options);
 }
 
 fn show_file_tree_recursive(
-    wnd: *RegzWindow,
-    arena: Allocator,
-    directory: VirtualFilesystem.ID,
-    children: []const VirtualFilesystem.Entry,
+    w: *RegzWindow,
+    directory_id: regz.virtual_io.Dir.ID,
     tree: *dvui.TreeWidget,
-    unique_id: dvui.Id,
     branch_options: dvui.Options,
     expander_options: dvui.Options,
 ) !void {
+    const directory = try directory_id.get(&w.vfs);
+    var children = directory.inner.iterator();
     var id_extra: usize = 0;
-    for (children, 0..) |child_entry, i| {
-        if (directory == .root and wnd.selected_file == null and i == 0) {
-            wnd.selected_file = child_entry.id;
-        }
+    while (children.next()) |child| {
+        const name = child.key_ptr.*;
+        const child_id = child.value_ptr.*;
+        const node = w.vfs.nodes.get(child_id) orelse continue;
+
         id_extra += 1;
         var branch_opts_override = dvui.Options{
             .id_extra = id_extra,
             .expand = .horizontal,
         };
         const expanded = true;
-        //oconst branch_id = tree.data().id.update(wnd.vfs.get_name(directory));
 
         const branch = tree.branch(@src(), .{ .expanded = expanded }, branch_opts_override.override(branch_options));
         defer branch.deinit();
-        switch (child_entry.kind) {
-            .directory => {
+        switch (node) {
+            .dir => {
                 dvui.icon(
                     @src(),
                     "FolderIcon",
                     dvui.entypo.folder,
                     .{},
-                    .{
-                        .gravity_y = 0.5,
-                    },
+                    .{ .gravity_y = 0.5 },
                 );
 
-                const name = wnd.vfs.get_name(child_entry.id);
                 _ = dvui.label(@src(), "{s}", .{name}, .{});
 
                 dvui.icon(
                     @src(),
                     "DropIcon",
                     if (branch.expanded) dvui.entypo.triangle_down else dvui.entypo.triangle_right,
-                    .{
-                        //.fill_color = color
-                    },
-                    .{
-                        .gravity_y = 0.5,
-                        .gravity_x = 1.0,
-                    },
+                    .{},
+                    .{ .gravity_y = 0.5, .gravity_x = 1.0 },
                 );
-
                 var expander_opts_override = dvui.Options{
                     .margin = .{ .x = 14 },
-                    //.color_border = color,
                     .background = if (expander_options.border != null) true else false,
                     .expand = .horizontal,
                 };
-
                 if (branch.expander(@src(), .{ .indent = 14 }, expander_opts_override.override(expander_options))) {
                     // The expander is open, so we need to add the branch to our tracking map
                     //reorder_tree_open_branches.put(branch_id, {}) catch {
                     //    dvui.log.debug("Failed to track branch state!", .{});
                     //};
-
                     var box = dvui.box(@src(), .{ .dir = .vertical }, .{
                         .expand = .horizontal,
                         .background = false,
@@ -1948,19 +1907,17 @@ fn show_file_tree_recursive(
                     defer box.deinit();
                 }
 
-                const grandchildren = try wnd.vfs.get_children(arena, child_entry.id);
-                try wnd.show_file_tree_recursive(arena, child_entry.id, grandchildren, tree, unique_id, branch_options, expander_options);
+                try w.show_file_tree_recursive(@fromBackingInt(child_id), tree, branch_options, expander_options);
             },
             .file => {
                 dvui.icon(@src(), "FileIcon", dvui.entypo.text_document, .{}, .{
                     .gravity_y = 0.5,
                 });
 
-                const name = wnd.vfs.get_name(child_entry.id);
                 _ = dvui.label(@src(), "{s}", .{name}, .{});
 
                 if (branch.button.clicked()) {
-                    wnd.selected_file = child_entry.id;
+                    w.selected_file = @as(regz.virtual_io.File.ID, @fromBackingInt(child_id)).to_std();
                     std.log.info("Clicked: {s}", .{name});
                 }
             },
@@ -2088,7 +2045,7 @@ fn show_create_patch_dialog_ui(wnd: *RegzWindow, arena: Allocator) void {
     for (wnd.loaded_patches.keys(), wnd.loaded_patches.values()) |path, loaded| {
         defer file_idx += 1;
 
-        const basename = std.fs.path.basename(path);
+        const basename = std.Io.Dir.path.basename(path);
         const is_selected = pending.selected_file_index != null and pending.selected_file_index.? == file_idx;
 
         if (loaded.is_editable and loaded.parse_error == null) {
@@ -2134,7 +2091,7 @@ fn show_create_patch_dialog_ui(wnd: *RegzWindow, arena: Allocator) void {
             .color_text = if (can_create) dvui.Color.fromHex("1C1B19") else dvui.Color.fromHex("918175"),
         }) and can_create) {
             // Create the patch
-            wnd.create_patch_from_group(arena, pending.*) catch |err| {
+            wnd.create_patch_from_group(pending.*) catch |err| {
                 wnd.validation_error_message = std.fmt.allocPrint(wnd.arena.allocator(), "Failed to create patch: {s}", .{@errorName(err)}) catch "Failed to create patch";
                 wnd.show_validation_error = true;
             };
@@ -2145,7 +2102,7 @@ fn show_create_patch_dialog_ui(wnd: *RegzWindow, arena: Allocator) void {
 }
 
 /// Create a patch from an equivalence group
-fn create_patch_from_group(wnd: *RegzWindow, arena: Allocator, pending: PendingPatchCreation) !void {
+fn create_patch_from_group(wnd: *RegzWindow, pending: PendingPatchCreation) !void {
     // Get the cached analysis result
     const cached = wnd.cached_analysis orelse return error.NoAnalysis;
 
@@ -2191,7 +2148,7 @@ fn create_patch_from_group(wnd: *RegzWindow, arena: Allocator, pending: PendingP
     wnd.has_unsaved_patches = true;
 
     // Apply the patch to the database so analysis reflects the change
-    try apply_single_patch(wnd.db, arena, patch);
+    try wnd.db.apply_patch(patch);
 
     // Refresh all views that depend on the database
     wnd.on_database_changed();
@@ -2242,25 +2199,23 @@ fn rebuild_database_with_patches(wnd: *RegzWindow) void {
     wnd.db.destroy();
 
     // Recreate database from source
-    wnd.db = regz.Database.create_from_path(wnd.gpa, wnd.format, wnd.path, wnd.device) catch |err| {
+    wnd.db = regz.Database.create_from_path(wnd.gpa, wnd.vfs.io(), wnd.format, wnd.path, wnd.device) catch |err| {
         std.log.err("Failed to recreate database: {}", .{err});
         return;
     };
-
-    const alloc = wnd.arena.allocator();
 
     // Reapply all non-deleted patches from all files
     for (wnd.loaded_patches.values()) |loaded| {
         if (loaded.patches) |patches| {
             for (patches, 0..) |patch, idx| {
                 if (!loaded.is_patch_deleted(idx)) {
-                    apply_single_patch(wnd.db, alloc, patch) catch continue;
+                    wnd.db.apply_patch(patch) catch continue;
                 }
             }
         }
         // Reapply pending patches
         for (loaded.pending_patches.items) |patch| {
-            apply_single_patch(wnd.db, alloc, patch) catch continue;
+            wnd.db.apply_patch(patch) catch continue;
         }
     }
 
@@ -2274,8 +2229,11 @@ fn on_database_changed(wnd: *RegzWindow) void {
     // Regenerate the virtual file system with new code
     // Deinit old VFS and create new one
     wnd.vfs.deinit();
-    wnd.vfs = .init(wnd.gpa);
-    wnd.db.to_zig(wnd.vfs.dir(), .{}) catch |err| {
+    wnd.vfs = VirtualIo.init(wnd.gpa) catch |err| {
+        std.log.err("Failed to create vfs: {}", .{err});
+        return;
+    };
+    wnd.db.to_zig(wnd.vfs.io(), VirtualIo.root_dir, .{}) catch |err| {
         std.log.err("Failed to regenerate code: {}", .{err});
     };
 
@@ -2300,13 +2258,8 @@ fn create_add_enum_and_apply_patch(
     // Build parent path: "types.peripherals.{peripheral_name}"
     const parent = try std.fmt.allocPrint(alloc, "types.peripherals.{s}", .{peripheral_name});
 
-    // Get the EnumField type from the Patch type using type introspection
-    const AddEnumAndApply = std.meta.TagPayload(regz.Patch, .add_enum_and_apply);
-    const EnumType = @TypeOf(@as(AddEnumAndApply, undefined).@"enum");
-    const EnumFieldType = std.meta.Child(@TypeOf(@as(EnumType, undefined).fields));
-
     // Convert fields (note: Database.EnumField.value is u64, Patch.EnumField.value is u32)
-    var fields = try alloc.alloc(EnumFieldType, group.fields.len);
+    var fields = try alloc.alloc(regz.Type.EnumField, group.fields.len);
     for (group.fields, 0..) |field, i| {
         fields[i] = .{
             .name = try alloc.dupe(u8, field.name),
@@ -2480,10 +2433,15 @@ fn save_all_patches(wnd: *RegzWindow, arena: Allocator) !void {
         try wnd.write_patch_file(path, loaded.*);
 
         // Reload patches from the saved file to update loaded.patches
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
-        const content = try file.readToEndAllocOptions(alloc, 10 * 1024 * 1024, null, .of(u8), 0);
-        const new_patches = std.zon.parse.fromSlice([]const regz.Patch, alloc, content, null, .{}) catch null;
+        var reader = (try std.Io.Dir.cwd()
+            .openFile(dvui.io, path, .{}))
+            .reader(dvui.io, "");
+        defer reader.file.close(dvui.io);
+
+        var writer: std.Io.Writer.Allocating = .init(alloc);
+        _ = try writer.writer.sendFile(&reader, .limited(10 * 1024 * 1024));
+
+        const new_patches = std.zon.parse.fromSliceAlloc([]const regz.Patch, alloc, try writer.toOwnedSliceSentinel(0), null, .{}) catch null;
 
         // Update the loaded state
         loaded.patches = new_patches;
@@ -2540,7 +2498,7 @@ fn validate_patch_file(wnd: *RegzWindow, arena: Allocator, patch_path: []const u
     const sub_path = switch (rsu.location) {
         inline else => |location| location.sub_path,
     };
-    const schema_path = try std.fs.path.join(arena, &.{ build_root, sub_path });
+    const schema_path = try std.Io.Dir.path.join(arena, &.{ build_root, sub_path });
 
     const format: regz.Database.Format = switch (rsu.format) {
         .svd => .svd,
@@ -2551,7 +2509,7 @@ fn validate_patch_file(wnd: *RegzWindow, arena: Allocator, patch_path: []const u
 
     const chip_name = if (target.chip_idx < rsu.chips.len) rsu.chips[target.chip_idx].name else null;
 
-    const db = try regz.Database.create_from_path(wnd.gpa, format, schema_path, chip_name);
+    const db = try regz.Database.create_from_path(wnd.gpa, wnd.vfs.io(), format, schema_path, chip_name);
     defer db.destroy();
 
     // Get the loaded patch data
@@ -2561,26 +2519,15 @@ fn validate_patch_file(wnd: *RegzWindow, arena: Allocator, patch_path: []const u
     if (loaded.patches) |patches| {
         for (patches, 0..) |patch, idx| {
             if (!loaded.is_patch_deleted(idx)) {
-                try apply_single_patch(db, arena, patch);
+                try db.apply_patch(patch);
             }
         }
     }
 
     // Apply pending patches
     for (loaded.pending_patches.items) |patch| {
-        try apply_single_patch(db, arena, patch);
+        try db.apply_patch(patch);
     }
-}
-
-/// Apply a single patch to a database
-fn apply_single_patch(db: *regz.Database, arena: Allocator, patch: regz.Patch) !void {
-    var zon_buf: std.Io.Writer.Allocating = .init(arena);
-    const patch_array: []const regz.Patch = &.{patch};
-    try std.zon.stringify.serialize(patch_array, .{}, &zon_buf.writer);
-    const zon_text = try arena.dupeZ(u8, zon_buf.written());
-
-    var diags: std.zon.parse.Diagnostics = .{};
-    try db.apply_patch(zon_text, &diags);
 }
 
 /// Write a patch file combining original (non-deleted) and pending patches
@@ -2619,12 +2566,14 @@ fn write_patch_file(wnd: *RegzWindow, path: []const u8, loaded: LoadedPatchFile)
     try std.zon.stringify.serialize(all_patches, .{
         .emit_default_optional_fields = false,
     }, &zon_buf.writer);
+    try zon_buf.writer.writeByte('\n');
 
     // Write to file
-    const file = try std.fs.cwd().createFile(path, .{});
-    defer file.close();
-    try file.writeAll(zon_buf.written());
-    try file.writeAll("\n");
+    var writer = (try std.Io.Dir.cwd()
+        .createFile(dvui.io, path, .{}))
+        .writer(dvui.io, "");
+    defer writer.file.close(dvui.io);
+    try writer.interface.writeAll(zon_buf.written());
 }
 
 // Unit tests for line diff computation

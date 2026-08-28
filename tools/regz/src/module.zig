@@ -7,7 +7,7 @@ pub const Patch = patch.Patch;
 pub const Type = patch.Type;
 pub const Arch = @import("arch.zig").Arch;
 pub const embassy = @import("embassy.zig");
-pub const VirtualIo = @import("virtual-io").VirtualIo;
+pub const virtual_io = @import("virtual-io");
 
 test {
     _ = Database;
